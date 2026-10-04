@@ -481,6 +481,14 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 .modal-symbol { width: 39px; height: 39px; display: grid; place-items: center; margin-bottom: 16px; color: #8fe0be; border: 1px solid rgba(131,228,192,.16); border-radius: 11px; background: rgba(131,228,192,.08); }
 .auth-modal h2 { margin: 5px 0 7px; font-family: var(--display); font-size: 22px; letter-spacing: -.045em; }
 .modal-copy { margin: 0; color: #a3a0ae; font-size: 10px; line-height: 1.65; }
+.google-signin-button { width: 100%; min-height: 43px; display: flex; align-items: center; justify-content: center; gap: 10px; position: relative; margin-top: 18px; padding: 0 38px; color: #24242a; border: 1px solid rgba(255,255,255,.74); border-radius: 8px; background: #f7f7f8; font-size: 10px; font-weight: 700; transition: .18s ease; }
+.google-signin-button:hover { background: white; box-shadow: 0 5px 20px rgba(0,0,0,.2); transform: translateY(-1px); }
+.google-signin-button:disabled { opacity: .6; transform: none; }
+.google-mark { width: 17px; height: 17px; flex: 0 0 auto; }
+.google-arrow { position: absolute; right: 13px; color: #7d7c84; }
+.google-signup-hint { margin: 8px 0 0; color: #898694; font-size: 8px; text-align: center; }
+.auth-divider { display: flex; align-items: center; gap: 9px; margin: 15px 0 11px; color: #777582; font-size: 7px; font-weight: 800; letter-spacing: .12em; }
+.auth-divider::before, .auth-divider::after { content: ''; height: 1px; flex: 1; background: rgba(255,255,255,.07); }
 .cloud-setup-note { margin-top: 19px; padding: 14px; border: 1px solid rgba(255,209,147,.14); border-radius: 10px; background: rgba(255,209,147,.045); }
 .setup-note-heading { display: flex; align-items: center; gap: 7px; color: #f1d199; font-size: 10px; }
 .cloud-setup-note > p { margin: 8px 0; color: #aaa5ac; font-size: 9px; line-height: 1.55; }
