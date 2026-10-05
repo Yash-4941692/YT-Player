@@ -4,9 +4,9 @@ A responsive YouTube study desk for JEE One Shots: native YouTube playback, per-
 
 ## Fastest way to try it (no keys or accounts)
 
-1. Open the GitHub branch [`arena/01a1050c-yt-player`](https://github.com/Yash-4941692/YT-Player/tree/arena/01a1050c-yt-player) to see the source files. The default `main` branch may still show the original starter until the pull request is merged.
+1. Open the GitHub branch [`arena/01a10a71-yt-player`](https://github.com/Yash-4941692/YT-Player/tree/arena/01a10a71-yt-player) to see the source files. The default `main` branch may still show the original starter until the pull request is merged.
 2. In Vercel, choose **Add New → Project** and import `Yash-4941692/YT-Player`.
-3. If Vercel asks for a Git branch, select `arena/01a1050c-yt-player` (or merge the pull request first and use `main`).
+3. If Vercel asks for a Git branch, select `arena/01a10a71-yt-player` (or merge the pull request first and use `main`).
 4. Use build command `npm run build` and output directory `dist`. Vercel usually detects Vite automatically. You do **not** need environment variables for guest mode.
 5. Click **Deploy**. On the deployed URL, paste a YouTube link and open your study room.
 
