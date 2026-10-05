@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Check, CircleCheck, CirclePlus, Clock3, Minus, Pause, Play, RotateCcw, Target, Trash2 } from 'lucide-react';
+import { Check, ChevronDown, CircleCheck, CirclePlus, Clock3, Minus, Pause, Play, RotateCcw, Target, Trash2 } from 'lucide-react';
 import type { FocusSession, StudyTask } from '../types';
 
 interface Props {
@@ -109,16 +109,16 @@ export function FocusTools({ sessions, goalMinutes, tasks, onComplete, onGoalCha
         <div className="timer-presets"><button className={preset === 25 ? 'selected' : ''} onClick={() => choosePreset(25)} disabled={running}>25 min</button><button className={preset === 50 ? 'selected' : ''} onClick={() => choosePreset(50)} disabled={running}>50 min</button></div>
       </div>
 
-      <div className="plan-block">
-        <div className="plan-title"><div><p className="eyebrow">SMALL STEPS ADD UP</p><h4>Today's plan</h4></div><span>{tasks.filter((task) => task.done).length}/{tasks.length}</span></div>
-        <form className="task-add-form" onSubmit={addTask}><input value={taskDraft} onChange={(event) => setTaskDraft(event.target.value)} placeholder="Add a topic to revise…" aria-label="New study task" maxLength={100} /><button type="submit" aria-label="Add task" disabled={!taskDraft.trim()}><CirclePlus size={17} /></button></form>
-        {tasks.length === 0 ? <p className="task-empty">Make a short list for this study session.</p> : (
+      <details className="plan-block">
+        <summary className="plan-title"><span className="plan-title-copy"><span className="eyebrow">YOUR CHECKLIST</span><strong>Today's plan</strong></span><span className="plan-summary-count">{tasks.filter((task) => task.done).length}/{tasks.length} done</span><ChevronDown className="plan-chevron" size={18} /></summary>
+        <form className="task-add-form" onSubmit={addTask}><input value={taskDraft} onChange={(event) => setTaskDraft(event.target.value)} placeholder="Add a topic to revise…" aria-label="New study task" maxLength={100} /><button type="submit" aria-label="Add task" disabled={!taskDraft.trim()}><CirclePlus size={18} /></button></form>
+        {tasks.length === 0 ? <p className="task-empty">Add a short list for this study session.</p> : (
           <ul className="task-list">
-            {tasks.slice(0, 5).map((task) => <li key={task.id} className={task.done ? 'task-done' : ''}><button className="task-check" onClick={() => onToggleTask(task.id)} aria-label={task.done ? 'Mark task incomplete' : 'Complete task'}>{task.done ? <Check size={12} /> : <span />}</button><span>{task.title}</span><button className="task-remove" onClick={() => onRemoveTask(task.id)} aria-label={`Remove ${task.title}`}><Trash2 size={13} /></button></li>)}
+            {tasks.slice(0, 5).map((task) => <li key={task.id} className={task.done ? 'task-done' : ''}><button className="task-check" onClick={() => onToggleTask(task.id)} aria-label={task.done ? 'Mark task incomplete' : 'Complete task'}>{task.done ? <Check size={13} /> : <span />}</button><span>{task.title}</span><button className="task-remove" onClick={() => onRemoveTask(task.id)} aria-label={`Remove ${task.title}`}><Trash2 size={14} /></button></li>)}
           </ul>
         )}
-        {tasks.length > 5 && <p className="task-overflow"><CircleCheck size={13} /> {tasks.length - 5} more in today's plan</p>}
-      </div>
+        {tasks.length > 5 && <p className="task-overflow"><CircleCheck size={14} /> {tasks.length - 5} more in today's plan</p>}
+      </details>
       <p className="timer-disclaimer"><Minus size={12} /> Focus sessions are saved to your study history when the timer completes.</p>
     </section>
   );

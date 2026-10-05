@@ -4,7 +4,7 @@ import {
   ArrowDownToLine, ArrowRight, ArrowUpRight, BookOpen, Bookmark, Check, ChevronDown,
   ChevronRight, CircleHelp, Cloud, CloudOff, FileText, Film, HardDrive, Headphones,
   Info, ListMusic, LockKeyhole, Maximize2, MessageSquarePlus, Play, Plus, RotateCcw,
-  ShieldCheck, Sparkles, Trash2, Upload, X, Zap,
+  ShieldCheck, Sparkles, Target, Trash2, Upload, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
@@ -16,6 +16,7 @@ import { formatBytes } from './lib/utils';
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
 import type { Bookmark as VideoBookmark, FocusSession, PersistedState, PlayerSource, PlayerVideoInfo, StudyTask, Subject, VideoRecord } from './types';
 import './styles.css';
+import './readability.css';
 
 type SidebarView = 'info' | 'chapters' | 'notes';
 type SyncStatus = 'local' | 'syncing' | 'synced' | 'error';
@@ -97,6 +98,7 @@ export default function App() {
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const notesDisclosureRef = useRef<HTMLDetailsElement>(null);
   const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
   const playlistIdRef = useRef<string | undefined>(undefined);
   const loadTokenRef = useRef(0);
@@ -487,6 +489,7 @@ export default function App() {
   }
 
   async function handlePdfUpload(file: File) {
+    notesDisclosureRef.current?.setAttribute('open', '');
     if (!activeVideoId) {
       setPdfError('Load a video before adding its notes.');
       return;
@@ -563,7 +566,7 @@ export default function App() {
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
-      if (target?.matches('input, textarea, select, [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (target?.closest('input, textarea, select, button, a, summary, [role="button"], [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey) return;
       const controls = playerControlsRef.current;
       if (!controls || !activeVideoId) return;
       const key = event.key.toLowerCase();
@@ -618,12 +621,12 @@ export default function App() {
             <div className="hero-copy">
               <p className="eyebrow hero-eyebrow"><span className="live-dot" /> A LITTLE MORE FOCUS, A LOT MORE FLOW</p>
               <h1>{activeVideoId ? <>Make this one-shot <em>count.</em></> : <>Your JEE one-shots,<br className="desktop-break" /> with a <em>study plan.</em></>}</h1>
-              <p className="hero-description">A calm home for YouTube lessons, timestamp chapters, personal notes, and focused study sessions.</p>
+              <p className="hero-description">Study JEE lessons with chapters, notes, and a focus timer—all in one calm workspace.</p>
             </div>
             <form className="video-load-form" onSubmit={(event) => loadYouTubeVideo(event)}>
               <div className="url-input-wrap"><span className="url-play-icon"><Play size={15} fill="currentColor" /></span><input aria-label="YouTube video or playlist URL" value={urlInput} onChange={(event) => { setUrlInput(event.target.value); setUrlError(''); }} placeholder="Paste a YouTube one-shot or playlist link…" /><span className="url-helper">YOUTUBE</span></div>
               <label className="subject-select-label"><span className="sr-only">Subject</span><select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a JEE subject">{subjects.map((subject) => <option key={subject}>{subject}</option>)}</select><ChevronDown size={13} /></label>
-              <button className="button-primary load-button" type="submit"><span>{activeVideoId ? 'Load video' : 'Open study room'}</span><ArrowRight size={16} /></button>
+              <button className="button-primary load-button" type="submit"><span>{activeVideoId ? 'Load video' : 'Start studying'}</span><ArrowRight size={17} /></button>
             </form>
             {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
             {syncStatus === 'error' && <p className="cloud-warning"><CloudOff size={14} /> Cloud sync paused. Your local browser copy is still available. <span title={syncMessage}>Details</span></p>}
@@ -631,28 +634,28 @@ export default function App() {
 
           {!source && (
             <section className="welcome-section">
-              <div className="welcome-heading"><span className="welcome-kicker">A BETTER WAY TO WATCH</span><span className="welcome-line" /></div>
+              <div className="welcome-heading"><span className="welcome-kicker">GET STARTED IN THREE SIMPLE STEPS</span><span className="welcome-line" /></div>
               <div className="welcome-cards">
                 <article className="welcome-card">
-                  <div className="welcome-icon mint"><Film size={18} /></div>
+                  <div className="welcome-icon mint"><Film size={20} /></div>
                   <span className="welcome-number">01</span>
-                  <h3>Bring your lesson</h3>
-                  <p>Paste a video or playlist. Your YouTube controls stay exactly where you expect them.</p>
+                  <h3>Paste a lesson</h3>
+                  <p>Start with any YouTube video or playlist.</p>
                 </article>
                 <article className="welcome-card">
-                  <div className="welcome-icon lavender"><ListMusic size={18} /></div>
+                  <div className="welcome-icon lavender"><ListMusic size={20} /></div>
                   <span className="welcome-number">02</span>
-                  <h3>Make a chapter map</h3>
-                  <p>Drop in description timestamps and jump to the concept you want to master.</p>
+                  <h3>Pick up the key ideas</h3>
+                  <p>Jump with chapters, save notes, and mark tricky moments.</p>
                 </article>
                 <article className="welcome-card">
-                  <div className="welcome-icon amber"><FileText size={18} /></div>
+                  <div className="welcome-icon amber"><Target size={20} /></div>
                   <span className="welcome-number">03</span>
-                  <h3>Keep notes close</h3>
-                  <p>Attach your class PDF and start a focused timer without leaving the study room.</p>
+                  <h3>Focus at your pace</h3>
+                  <p>Set a timer and keep your study progress together.</p>
                 </article>
               </div>
-              <div className="welcome-footnote"><ShieldCheck size={15} /> No demo videos. Your space is yours to fill.</div>
+              <div className="welcome-footnote"><ShieldCheck size={16} /> No demo videos. Your space is yours to fill.</div>
             </section>
           )}
 
@@ -682,47 +685,60 @@ export default function App() {
                     </div>
                   </div>
                   <div className="player-progress"><span style={{ width: `${progress}%` }} /></div>
-                  <div className="shortcut-strip"><span><Zap size={13} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
+                  <details className="shortcut-disclosure">
+                    <summary><span><Zap size={15} /> Keyboard shortcuts</span><span className="shortcut-summary-action">Show <ChevronDown size={15} /></span></summary>
+                    <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
+                  </details>
                 </article>
 
-                <section className="chapters-editor glass-card">
-                  <div className="section-heading chapters-editor-heading">
-                    <div className="section-title-lockup"><div className="section-icon violet"><ListMusic size={18} /></div><div><p className="eyebrow">MAKE EVERY MINUTE COUNT</p><h3>Video chapters</h3></div></div>
-                    <div className="chapter-heading-actions"><span className="chapter-count">{parsedChapters.length} {parsedChapters.length === 1 ? 'CHAPTER' : 'CHAPTERS'}</span><a className="description-link" href="https://www.toolsoverflow.com/youtube/youtube-title-description-extractor" target="_blank" rel="noreferrer">Get description <ArrowUpRight size={13} /></a></div>
+                <details className="chapters-editor disclosure-card glass-card">
+                  <summary className="disclosure-summary">
+                    <span className="section-title-lockup">
+                      <span className="section-icon violet"><ListMusic size={20} /></span>
+                      <span className="disclosure-copy"><span className="eyebrow">OPTIONAL</span><span className="disclosure-title">Chapter map</span><span className="disclosure-subtitle">{parsedChapters.length ? 'Timestamps are ready to jump to' : 'Add timestamps to jump to a topic'}</span></span>
+                    </span>
+                    <span className="disclosure-summary-end"><span className="chapter-count">{parsedChapters.length} {parsedChapters.length === 1 ? 'CHAPTER' : 'CHAPTERS'}</span><span className="disclosure-chevron"><ChevronDown size={18} /></span></span>
+                  </summary>
+                  <div className="disclosure-body">
+                    <div className="chapter-editor-toolbar"><p className="section-description">Paste the timestamps from your video description. Chapters save automatically for this lesson.</p><a className="description-link" href="https://www.toolsoverflow.com/youtube/youtube-title-description-extractor" target="_blank" rel="noreferrer">Find timestamps <ArrowUpRight size={14} /></a></div>
+                    <textarea className="chapters-textarea" value={chaptersRaw} onChange={(event) => setChaptersRaw(event.target.value)} placeholder={'00:00 Introduction\n08:00 - Kinematics\n01:19:42 Work, energy and power'} spellCheck={false} aria-label="Paste video timestamps and chapter titles" />
+                    <div className="chapter-editor-footer"><span><Info size={14} /> One timestamp per line · MM:SS or HH:MM:SS</span><span className={parsedChapters.length ? 'parse-success' : ''}>{parsedChapters.length ? <><Check size={14} /> Saved for this video</> : 'Private to this video'}</span></div>
                   </div>
-                  <p className="section-description">Paste timestamps from the video description. They parse as you type and follow the current video.</p>
-                  <textarea className="chapters-textarea" value={chaptersRaw} onChange={(event) => setChaptersRaw(event.target.value)} placeholder={'00:00 Introduction\n08:00 - Kinematics\n01:19:42 Work, energy and power'} spellCheck={false} aria-label="Paste video timestamps and chapter titles" />
-                  <div className="chapter-editor-footer"><span><Info size={13} /> One timestamp per line · MM:SS or HH:MM:SS</span><span className={parsedChapters.length ? 'parse-success' : ''}>{parsedChapters.length ? <><Check size={13} /> Auto-saved for this video</> : 'Chapters are private to this video'}</span></div>
-                </section>
+                </details>
 
-                <section className="notes-card glass-card">
-                  <div className="section-heading notes-heading">
-                    <div className="section-title-lockup"><div className="section-icon amber"><FileText size={18} /></div><div><p className="eyebrow">YOUR REVISION COMPANION</p><h3>Video notes <span className="pdf-pill">PDF</span></h3></div></div>
-                    {pdfPreview && <button className="text-button remove-pdf" onClick={() => void deletePdf()} disabled={pdfBusy}><Trash2 size={14} /> Remove</button>}
+                <details ref={notesDisclosureRef} className="notes-card disclosure-card glass-card">
+                  <summary className="disclosure-summary">
+                    <span className="section-title-lockup">
+                      <span className="section-icon amber"><FileText size={20} /></span>
+                      <span className="disclosure-copy"><span className="eyebrow">OPTIONAL</span><span className="disclosure-title">Video notes</span><span className="disclosure-subtitle">{pdfPreview?.name ?? (activeRecord?.pdfPath && !authUser ? 'Private notes · sign in to open' : pdfLoading ? 'Loading saved notes…' : 'Attach a PDF to read beside the video')}</span></span>
+                    </span>
+                    <span className="disclosure-summary-end"><span className={pdfPreview || activeRecord?.pdfPath || sessionPdf ? 'notes-status ready' : 'notes-status'}>{pdfPreview ? 'PDF READY' : activeRecord?.pdfPath || sessionPdf ? 'SAVED' : 'ADD PDF'}</span><span className="disclosure-chevron"><ChevronDown size={18} /></span></span>
+                  </summary>
+                  <div className="disclosure-body notes-disclosure-body">
+                    {pdfPreview && <div className="notes-card-action-row"><span><Check size={15} /> Notes attached to this video</span><button className="text-button remove-pdf" onClick={() => void deletePdf()} disabled={pdfBusy}><Trash2 size={15} /> Remove</button></div>}
+                    {!pdfPreview && activeRecord?.pdfPath && !authUser && !sessionPdf ? (
+                      <div className="pdf-file-row locked-pdf-row"><div className="pdf-file-icon"><LockKeyhole size={19} /></div><div className="pdf-file-info"><strong title={activeRecord.pdfName}>{activeRecord.pdfName || 'Private PDF notes'}</strong><span>{formatBytes(activeRecord.pdfSize)} <i /> Saved to a private account</span></div><button className="replace-pdf-button" onClick={() => setAuthOpen(true)}><Cloud size={14} /> Sign in</button></div>
+                    ) : !pdfPreview ? (
+                      <div className={`pdf-dropzone ${pdfBusy ? 'is-uploading' : ''}`} role="button" tabIndex={0} onClick={() => fileInputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') fileInputRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={handlePdfDrop} aria-label="Upload a PDF for this video">
+                        <div className="upload-icon-wrap"><Upload size={20} /></div>
+                        <div className="pdf-drop-copy"><strong>{pdfBusy ? 'Reading your notes…' : 'Drop your notes PDF here'}</strong><span>or <b>browse files</b> · PDF only · up to 100 MB</span></div>
+                        <span className="upload-arrow"><ChevronRight size={18} /></span>
+                      </div>
+                    ) : (
+                      <div className="pdf-file-row">
+                        <div className="pdf-file-icon"><FileText size={20} /></div>
+                        <div className="pdf-file-info"><strong title={pdfPreview.name}>{pdfPreview.name}</strong><span>{formatBytes(pdfPreview.size)} <i /> {pdfPreview.cloud ? 'Saved to your private cloud library' : 'Available for this session'}</span></div>
+                        <button className="replace-pdf-button" onClick={() => fileInputRef.current?.click()} disabled={pdfBusy}><RotateCcw size={14} /> Replace</button>
+                      </div>
+                    )}
+                    {pdfBusy && <div className="upload-progress"><span /></div>}
+                    {pdfError && <p className="pdf-error" role="alert"><Info size={14} /> {pdfError}</p>}
+                    <div className="pdf-storage-note"><span className={pdfPreview?.cloud ? 'storage-cloud' : 'storage-session'}>{pdfPreview?.cloud ? <Cloud size={15} /> : <Info size={15} />}</span><span>{pdfStatus || (activeRecord?.pdfPath && !authUser && !sessionPdf ? 'Sign in to access this private cloud PDF.' : authUser ? 'PDFs attached to this video sync privately with your account.' : 'Session storage — notes are kept while the page is open.')}</span></div>
+                    {pdfPreview && <button className="open-pdf-inline" onClick={() => setSidebarView('notes')}><BookOpen size={15} /> Open notes beside the video <ArrowRight size={14} /></button>}
+                    {pdfLoading && <p className="pdf-loading-message"><span className="mini-spinner" /> Fetching your cloud notes…</p>}
                   </div>
-                  {!pdfPreview && activeRecord?.pdfPath && !authUser && !sessionPdf ? (
-                    <div className="pdf-file-row locked-pdf-row"><div className="pdf-file-icon"><LockKeyhole size={18} /></div><div className="pdf-file-info"><strong title={activeRecord.pdfName}>{activeRecord.pdfName || 'Private PDF notes'}</strong><span>{formatBytes(activeRecord.pdfSize)} <i /> Saved to a private account</span></div><button className="replace-pdf-button" onClick={() => setAuthOpen(true)}><Cloud size={13} /> Sign in</button></div>
-                  ) : !pdfPreview ? (
-                    <div className={`pdf-dropzone ${pdfBusy ? 'is-uploading' : ''}`} role="button" tabIndex={0} onClick={() => fileInputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') fileInputRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={handlePdfDrop} aria-label="Upload a PDF for this video">
-                      <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
-                      <div className="upload-icon-wrap"><Upload size={18} /></div>
-                      <div className="pdf-drop-copy"><strong>{pdfBusy ? 'Reading your notes…' : 'Drop your notes PDF here'}</strong><span>or <b>browse files</b> · PDF only · up to 100 MB</span></div>
-                      <span className="upload-arrow"><ChevronRight size={17} /></span>
-                    </div>
-                  ) : (
-                    <div className="pdf-file-row">
-                      <div className="pdf-file-icon"><FileText size={19} /></div>
-                      <div className="pdf-file-info"><strong title={pdfPreview.name}>{pdfPreview.name}</strong><span>{formatBytes(pdfPreview.size)} <i /> {pdfPreview.cloud ? 'Saved to your private cloud library' : 'Available for this session'}</span></div>
-                      <button className="replace-pdf-button" onClick={() => fileInputRef.current?.click()} disabled={pdfBusy}><RotateCcw size={13} /> Replace</button>
-                      <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
-                    </div>
-                  )}
-                  {pdfBusy && <div className="upload-progress"><span /></div>}
-                  {pdfError && <p className="pdf-error" role="alert"><Info size={13} /> {pdfError}</p>}
-                  <div className="pdf-storage-note"><span className={pdfPreview?.cloud ? 'storage-cloud' : 'storage-session'}>{pdfPreview?.cloud ? <Cloud size={14} /> : <Info size={14} />}</span><span>{pdfStatus || (activeRecord?.pdfPath && !authUser && !sessionPdf ? 'Sign in to access this private cloud PDF.' : authUser ? 'PDFs attached to this video sync privately with your account.' : 'Session storage — notes are kept while the page is open.')}</span></div>
-                  {pdfPreview && <button className="open-pdf-inline" onClick={() => setSidebarView('notes')}><BookOpen size={14} /> Open notes beside the video <ArrowRight size={13} /></button>}
-                  {pdfLoading && <p className="pdf-loading-message"><span className="mini-spinner" /> Fetching your cloud notes…</p>}
-                </section>
+                </details>
+                <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
               </div>
 
               <aside className="workspace-aside">
@@ -778,10 +794,6 @@ export default function App() {
               </div>
               {filteredLibrary.length > 8 && <p className="library-more">Showing your 8 most recent videos · {filteredLibrary.length} total</p>}
             </section>
-          )}
-
-          {!source && videos.length === 0 && (
-            <section className="focus-promo glass-card"><div className="promo-icon"><Zap size={18} fill="currentColor" /></div><div><p className="eyebrow">BUILT FOR DEEP WORK</p><h3>Small systems. Serious progress.</h3><p>Use the 25-minute focus timer, set a daily target, and collect tricky moments into a personal revision shelf.</p></div><div className="promo-chips"><span>Focus timer</span><span>Revision queue</span><span>Private notes</span></div></section>
           )}
 
           <footer className="footer"><a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a><p>Made for your next breakthrough. Videos are streamed by YouTube.</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a></footer>
