@@ -207,10 +207,15 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 1040px) {
+  .page-content { padding-inline: 28px; }
   .hero { grid-template-columns: 1fr; gap: 26px; padding-top: 52px; }
   .hero-copy { max-width: 740px; }
   .hero-description { max-width: 660px; }
   .video-load-form { max-width: none; }
+  /* Stack the study room into one column on tablets and phones. This layer
+     loads after styles.css, so its two-column base rule above would otherwise
+     keep winning here and squeeze the video beside a 430px notes column. */
+  .workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "panel" "editor"; gap: 18px; }
   .study-panel { height: auto; max-height: none; }
   .pdf-scroll { height: min(66vh, 660px); min-height: 420px; }
   .chapters-scroll { max-height: min(60vh, 560px); }
@@ -221,6 +226,11 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .topbar { height: 74px; }
   .brand-mark { width: 32px; height: 32px; }
   .brand-name { font-size: 19px; }
+  .topbar-actions { gap: 10px; }
+  /* Collapse the sync pill to its icon on phones; the base layer's larger
+     labelled pill would push the sign-in button off screen. */
+  .sync-pill { gap: 0; font-size: 0; }
+  .sync-pill svg { width: 18px; height: 18px; }
   .hero { gap: 20px; padding-top: 40px; padding-bottom: 32px; }
   .hero h1 { font-size: clamp(34px, 8vw, 50px); }
   .hero-description { font-size: 15px; }
@@ -232,8 +242,9 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .subject-select-label select { font-size: 13px; }
   .button-primary { font-size: 13px; }
   .welcome-kicker { font-size: 10px; }
-  .welcome-card { padding: 18px; column-gap: 13px; grid-template-columns: 44px minmax(0,1fr) auto; }
-  .welcome-card h3 { font-size: 16px; }
+  .welcome-cards { gap: 10px; }
+  .welcome-card { min-height: 0; padding: 18px; column-gap: 13px; grid-template-columns: 44px minmax(0,1fr) auto; }
+  .welcome-card h3 { margin: 0; font-size: 16px; }
   .welcome-card p { font-size: 13px; }
   .workspace { gap: 16px; }
   .player-topline { height: 44px; padding-inline: 13px; }
@@ -241,6 +252,8 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .player-title-wrap h2 { font-size: 15px; }
   .player-title-wrap p { font-size: 11px; }
   .notes-jump { min-height: 42px; font-size: 13px; }
+  .shortcut-disclosure > summary { padding-inline: 14px; }
+  .shortcut-strip { padding-inline: 14px; }
   .disclosure-summary { min-height: 84px; padding: 15px 17px; }
   .disclosure-title { font-size: 17px; }
   .disclosure-subtitle { max-width: 44vw; font-size: 12px; }
@@ -250,7 +263,7 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .chapter-editor-footer { font-size: 12px; }
   .panel-tabs button { min-height: 54px; font-size: 13px; }
   .pdf-toolbar { padding: 9px 11px; }
-  .pdf-toolbar-name { font-size: 12px; }
+  .pdf-toolbar-name { max-width: 100%; font-size: 12px; }
   .pdf-scroll { height: min(64vh, 600px); min-height: 380px; padding: 12px; }
   .pdf-empty-state strong { font-size: 17px; }
   .pdf-empty-state p { font-size: 13px; }
@@ -271,6 +284,9 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .library-resume-button { font-size: 12px; }
   .footer { min-height: 82px; padding-block: 15px; }
   .toast-message { right: 14px; bottom: 14px; }
+  /* 16px form text stops iOS Safari from zooming the whole page in when a
+     field is focused. Must stay last so it wins over the sizes above. */
+  .url-input-wrap input, .subject-select-label select, .chapters-textarea, .pdf-page-input, .auth-form input { font-size: 16px; }
 }
 @media (max-width: 480px) {
   .page-content { padding-inline: 15px; }
@@ -281,8 +297,9 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .hero-eyebrow { gap: 8px; font-size: 9px; }
   .hero-description { font-size: 14px; }
   .url-input-wrap { gap: 8px; padding-inline: 9px; }
-  .url-input-wrap input { font-size: 12px; }
   .url-helper { display: none; }
+  /* Give the subject select enough room on the smallest phones. */
+  .video-load-form { grid-template-columns: minmax(0, 1fr) minmax(112px, 138px); }
   .load-button { padding-inline: 10px; }
   .welcome-card { padding: 16px; column-gap: 11px; }
   .player-live-label { gap: 6px; font-size: 9px; }
@@ -294,6 +311,7 @@ kbd, .shortcut-strip kbd { min-width: 24px; height: 23px; padding-inline: 5px; b
   .disclosure-subtitle { max-width: 50vw; font-size: 11px; }
   .pdf-toolbar-actions { gap: 6px; }
   .pdf-control-group button, .pdf-control-group a { width: 31px; height: 31px; }
+  .pdf-page-input { width: 42px; }
   .pdf-scroll { height: min(62vh, 540px); min-height: 340px; padding: 10px; }
   .pdf-page { border-radius: 6px; }
   .chapter-time { min-width: 48px; font-size: 11px; }
