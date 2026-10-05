@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Bookmark, FocusSession, StudyTask, Subject, VideoRecord } from '../types';
+import type { Subject, VideoRecord } from '../types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -23,9 +23,7 @@ interface WatchRow {
   current_time: number;
   duration: number;
   subject: Subject;
-  is_revision: boolean;
-  hidden_from_recent?: boolean;
-  bookmarks: Bookmark[];
+  hidden_from_recent?: boolean | null;
   pdf_path: string | null;
   pdf_name: string | null;
   pdf_size: number | null;
@@ -44,9 +42,7 @@ function rowToVideo(row: WatchRow): VideoRecord {
     currentTime: Number(row.current_time) || 0,
     duration: Number(row.duration) || 0,
     subject: row.subject || 'Other',
-    isRevision: Boolean(row.is_revision),
-    hiddenFromRecent: Boolean(row.hidden_from_recent),
-    bookmarks: Array.isArray(row.bookmarks) ? row.bookmarks : [],
+    archived: Boolean(row.hidden_from_recent),
     pdfPath: row.pdf_path || undefined,
     pdfName: row.pdf_name || undefined,
     pdfSize: row.pdf_size ? Number(row.pdf_size) : undefined,
@@ -66,21 +62,12 @@ function videoToRow(record: VideoRecord): Omit<WatchRow, 'updated_at'> & { updat
     current_time: record.currentTime,
     duration: record.duration,
     subject: record.subject,
-    is_revision: record.isRevision,
-    hidden_from_recent: Boolean(record.hiddenFromRecent),
-    bookmarks: record.bookmarks,
+    hidden_from_recent: Boolean(record.archived),
     pdf_path: record.pdfPath || null,
     pdf_name: record.pdfName || null,
     pdf_size: record.pdfSize || null,
     updated_at: new Date(record.updatedAt).toISOString(),
   };
-}
-
-export interface RemoteStudyState {
-  focusSessions: FocusSession[];
-  dailyGoalMinutes: number;
-  tasks: StudyTask[];
-  stateUpdatedAt: number;
 }
 
 export async function fetchCloudVideos(userId: string): Promise<VideoRecord[]> {
@@ -95,29 +82,6 @@ export async function saveCloudVideo(userId: string, record: VideoRecord): Promi
   const { error } = await supabase.from('watch_items').upsert(
     { ...videoToRow(record), user_id: userId },
     { onConflict: 'user_id,video_id' },
-  );
-  if (error) throw error;
-}
-
-export async function fetchCloudStudyState(userId: string): Promise<RemoteStudyState | null> {
-  if (!supabase) return null;
-  const { data, error } = await supabase.from('study_state').select('data').eq('user_id', userId).maybeSingle();
-  if (error) throw error;
-  if (!data?.data || typeof data.data !== 'object') return null;
-  const state = data.data as Partial<RemoteStudyState>;
-  return {
-    focusSessions: Array.isArray(state.focusSessions) ? state.focusSessions : [],
-    dailyGoalMinutes: Number.isFinite(state.dailyGoalMinutes) ? Number(state.dailyGoalMinutes) : 180,
-    tasks: Array.isArray(state.tasks) ? state.tasks : [],
-    stateUpdatedAt: Number.isFinite(state.stateUpdatedAt) ? Number(state.stateUpdatedAt) : Date.now(),
-  };
-}
-
-export async function saveCloudStudyState(userId: string, state: RemoteStudyState): Promise<void> {
-  if (!supabase) return;
-  const { error } = await supabase.from('study_state').upsert(
-    { user_id: userId, data: state, updated_at: new Date().toISOString() },
-    { onConflict: 'user_id' },
   );
   if (error) throw error;
 }

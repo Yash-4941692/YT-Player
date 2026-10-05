@@ -6,13 +6,6 @@ export interface Chapter {
   timeLabel: string;
 }
 
-export interface Bookmark {
-  id: string;
-  seconds: number;
-  label: string;
-  createdAt: number;
-}
-
 export interface VideoRecord {
   videoId: string;
   title: string;
@@ -24,34 +17,15 @@ export interface VideoRecord {
   currentTime: number;
   duration: number;
   subject: Subject;
-  isRevision: boolean;
-  hiddenFromRecent?: boolean;
-  bookmarks: Bookmark[];
+  archived?: boolean;
   pdfPath?: string;
   pdfName?: string;
   pdfSize?: number;
   updatedAt: number;
 }
 
-export interface FocusSession {
-  id: string;
-  minutes: number;
-  endedAt: number;
-}
-
-export interface StudyTask {
-  id: string;
-  title: string;
-  done: boolean;
-  createdAt: number;
-}
-
 export interface PersistedState {
   videos: VideoRecord[];
-  focusSessions: FocusSession[];
-  dailyGoalMinutes: number;
-  tasks: StudyTask[];
-  stateUpdatedAt: number;
 }
 
 export interface PlayerSource {
@@ -73,3 +47,5 @@ export interface SessionPdf {
   name: string;
   size: number;
 }
+
+export type StudyPanelView = 'notes' | 'timestamps';

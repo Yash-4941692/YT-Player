@@ -8,10 +8,11 @@ interface Props {
   activeIndex: number;
   currentTime: number;
   onSeek: (seconds: number) => void;
+  onAddTimestamps?: () => void;
   compact?: boolean;
 }
 
-export function ChaptersPanel({ chapters, activeIndex, currentTime, onSeek, compact = false }: Props) {
+export function ChaptersPanel({ chapters, activeIndex, currentTime, onSeek, onAddTimestamps, compact = false }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const pauseUntilRef = useRef(0);
@@ -63,9 +64,11 @@ export function ChaptersPanel({ chapters, activeIndex, currentTime, onSeek, comp
     return (
       <div className="empty-panel chapters-empty">
         <div className="empty-panel-icon"><ListMusic size={20} /></div>
-        <strong>Your chapter map starts here</strong>
-        <p>Paste timestamps from the video description. The active chapter will follow along as you watch.</p>
-        <span className="example-code">00:00 · Introduction</span>
+        <strong>Your timestamps live here</strong>
+        <p>Paste the timestamps from the video description. The active chapter follows along as you watch.</p>
+        {onAddTimestamps
+          ? <button className="button-outline small-outline" onClick={onAddTimestamps}><ListMusic size={14} /> Add timestamps</button>
+          : <span className="example-code">00:00 · Introduction</span>}
       </div>
     );
   }

@@ -1,16 +1,14 @@
 # Focusframe — JEE Study Player
 
-A responsive YouTube study desk for JEE One Shots: native YouTube playback, per-video timestamp chapters and PDF notes, continue watching, revision markers, a Pomodoro timer, daily targets, and a topic checklist.
+A responsive YouTube study desk for JEE One Shots: native YouTube playback with your timestamp chapters and PDF notes open side by side. The PDF viewer renders pages on canvas, so notes are readable inline on phones and desktop (no download prompt), and the whole app is built around one screen — video on one side, notes on the other, your library below.
 
 ## Fastest way to try it (no keys or accounts)
 
-1. Open the GitHub branch [`arena/01a10a71-yt-player`](https://github.com/Yash-4941692/YT-Player/tree/arena/01a10a71-yt-player) to see the source files. The default `main` branch may still show the original starter until the pull request is merged.
-2. In Vercel, choose **Add New → Project** and import `Yash-4941692/YT-Player`.
-3. If Vercel asks for a Git branch, select `arena/01a10a71-yt-player` (or merge the pull request first and use `main`).
-4. Use build command `npm run build` and output directory `dist`. Vercel usually detects Vite automatically. You do **not** need environment variables for guest mode.
-5. Click **Deploy**. On the deployed URL, paste a YouTube link and open your study room.
+1. In Vercel, choose **Add New → Project** and import `Yash-4941692/YT-Player`.
+2. Use build command `npm run build` and output directory `dist`. Vercel usually detects Vite automatically. You do **not** need environment variables for guest mode.
+3. Click **Deploy**. On the deployed URL, paste a YouTube link and open your study room.
 
-Guest mode saves video progress, chapters, revision markers, goals, and the study plan in that browser. Guest PDF files stay in memory only while the page is open. Guest data is not shared between devices.
+Guest mode saves your lessons, progress and timestamps in that browser. Guest PDF files stay in memory only while the page is open. Guest data is not shared between devices.
 
 ## Optional: one-click Google sign-in and cloud sync
 
@@ -55,7 +53,7 @@ Apply the variables to **Production** (and Preview/Development if you need those
 
 ### 5. Sign in
 
-Open your deployed Focusframe site, click **Sync across devices → Continue with Google**, and pick an account. First-time users are signed up automatically. Their watch history, chapters, revision markers, study goals/tasks, focus sessions, and uploaded PDFs then sync through their account. PDFs are private and opened with short-lived links.
+Open your deployed Focusframe site, click **Sync across devices → Continue with Google**, and pick an account. First-time users are signed up automatically. Their lessons, progress, timestamp chapters and uploaded PDFs then sync through their account. PDFs are private and opened with short-lived links.
 
 The site and guest mode can be hosted without charge within the current Vercel free plan limits. Supabase and Google have their own free-tier/usage limits, which can change. The app accepts PDFs up to 100 MB, but your Supabase project's upload limit may be lower.
 
@@ -71,3 +69,4 @@ npm run dev
 - YouTube videos are embedded/streamed by YouTube; the app does not download or host videos. Some owners disable embedding, in which case the player offers a link to open the video on YouTube.
 - Keyboard shortcuts (when not typing): **Space** play/pause, **← / →** seek 10 seconds, **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions.
 - There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library.
+- PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, loaded only when a notes panel is opened. Pages render lazily, so large PDFs stay smooth on phones.

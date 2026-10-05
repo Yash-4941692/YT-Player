@@ -1,24 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import type { User } from '@supabase/supabase-js';
 import {
-  ArrowDownToLine, ArrowRight, ArrowUpRight, BookOpen, Bookmark, Check, ChevronDown,
-  ChevronRight, CircleHelp, Cloud, CloudOff, FileText, Film, HardDrive, Headphones,
-  Info, ListMusic, LockKeyhole, Maximize2, MessageSquarePlus, Play, Plus, RotateCcw,
-  ShieldCheck, Sparkles, Target, Trash2, Upload, X, Zap,
+  ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff, FileText, Film,
+  HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
-import { FocusTools } from './components/FocusTools';
+import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
-import { cloudConfigured, createPdfSignedUrl, deleteCloudPdf, fetchCloudStudyState, fetchCloudVideos, saveCloudStudyState, saveCloudVideo, supabase, uploadCloudPdf } from './lib/supabase';
+import { cloudConfigured, createPdfSignedUrl, deleteCloudPdf, fetchCloudVideos, saveCloudVideo, supabase, uploadCloudPdf } from './lib/supabase';
 import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
-import { formatBytes } from './lib/utils';
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
-import type { Bookmark as VideoBookmark, FocusSession, PersistedState, PlayerSource, PlayerVideoInfo, StudyTask, Subject, VideoRecord } from './types';
+import type { PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
 import './styles.css';
 import './readability.css';
 
-type SidebarView = 'info' | 'chapters' | 'notes';
 type SyncStatus = 'local' | 'syncing' | 'synced' | 'error';
 
 interface PdfPreview {
@@ -37,14 +33,6 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   return response.blob();
 }
 
-function relativeDate(timestamp: number): string {
-  const elapsed = Date.now() - timestamp;
-  if (elapsed < 60_000) return 'just now';
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} min ago`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} hr ago`;
-  return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
 function subjectClass(subject: Subject): string {
   return subject.toLowerCase().replace(/\s+/g, '-');
 }
@@ -54,17 +42,9 @@ function progressPercent(record: VideoRecord): number {
   return Math.min(100, Math.max(0, (record.currentTime / record.duration) * 100));
 }
 
-function makeBookmark(seconds: number, label: string): VideoBookmark {
-  return { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, seconds, label, createdAt: Date.now() };
-}
-
 export default function App() {
   const [initialState] = useState(loadLocalState);
   const [videos, setVideos] = useState<VideoRecord[]>(initialState.videos);
-  const [focusSessions, setFocusSessions] = useState<FocusSession[]>(initialState.focusSessions);
-  const [dailyGoalMinutes, setDailyGoalMinutes] = useState(initialState.dailyGoalMinutes);
-  const [tasks, setTasks] = useState<StudyTask[]>(initialState.tasks);
-  const [studyStateUpdatedAt, setStudyStateUpdatedAt] = useState(initialState.stateUpdatedAt);
   const [storageAvailable, setStorageAvailable] = useState(true);
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -85,50 +65,48 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [playerDuration, setPlayerDuration] = useState(0);
   const [chaptersRaw, setChaptersRaw] = useState('');
-  const [sidebarView, setSidebarView] = useState<SidebarView>('info');
+  const [panelView, setPanelView] = useState<StudyPanelView>('notes');
+  const [notesExpanded, setNotesExpanded] = useState(false);
   const [toast, setToast] = useState('');
   const [pdfError, setPdfError] = useState('');
   const [pdfStatus, setPdfStatus] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfPreview, setPdfPreview] = useState<PdfPreview | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
-  const [pdfZoom, setPdfZoom] = useState(100);
-  const [notesRevision, setNotesRevision] = useState(0);
-  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject | 'revision'>('all');
+  const [notesVersion, setNotesRevision] = useState(0);
+  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject>('all');
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const notesDisclosureRef = useRef<HTMLDetailsElement>(null);
+  const timestampsRef = useRef<HTMLDetailsElement>(null);
   const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
   const playlistIdRef = useRef<string | undefined>(undefined);
   const loadTokenRef = useRef(0);
   const lastProgressSaveRef = useRef(-1);
   const videosRef = useRef(videos);
-  const studyStateRef = useRef({ focusSessions, dailyGoalMinutes, tasks, stateUpdatedAt: studyStateUpdatedAt });
   videosRef.current = videos;
-  studyStateRef.current = { focusSessions, dailyGoalMinutes, tasks, stateUpdatedAt: studyStateUpdatedAt };
 
   const activeRecord = useMemo(
     () => activeVideoId ? videos.find((video) => video.videoId === activeVideoId) ?? null : null,
     [videos, activeVideoId],
   );
   const parsedChapters = useMemo(() => parseChapters(chaptersRaw), [chaptersRaw]);
-  const activeChapterIndex = (() => {
+  const activeChapterIndex = useMemo(() => {
     let index = -1;
     for (let chapterIndex = 0; chapterIndex < parsedChapters.length; chapterIndex += 1) {
       if (currentTime >= parsedChapters[chapterIndex].seconds) index = chapterIndex;
       else break;
     }
     return index;
-  })();
+  }, [parsedChapters, currentTime]);
   const sessionPdf = activeVideoId ? notesSessionRef.current[activeVideoId] : undefined;
+  const activeSubject = activeRecord?.subject ?? selectedSubject;
+  const activeTitle = activeRecord?.title || (playerReady ? 'YouTube lesson' : 'Your lesson is loading…');
 
   const showToast = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(''), 3200);
   }, []);
-
-  const markStudyChanged = useCallback(() => setStudyStateUpdatedAt(Date.now()), []);
 
   const updateVideo = useCallback((videoId: string, patch: Partial<VideoRecord>) => {
     setVideos((current) => {
@@ -139,9 +117,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const state: PersistedState = { videos, focusSessions, dailyGoalMinutes, tasks, stateUpdatedAt: studyStateUpdatedAt };
+    const state: PersistedState = { videos };
     setStorageAvailable(saveLocalState(state));
-  }, [videos, focusSessions, dailyGoalMinutes, tasks, studyStateUpdatedAt]);
+  }, [videos]);
 
   useEffect(() => {
     if (!supabase) {
@@ -176,10 +154,7 @@ export default function App() {
     setSyncMessage('Loading your study library…');
     (async () => {
       try {
-        const [remoteVideos, remoteStudy] = await Promise.all([
-          fetchCloudVideos(authUser.id),
-          fetchCloudStudyState(authUser.id),
-        ]);
+        const remoteVideos = await fetchCloudVideos(authUser.id);
         if (cancelled) return;
         const merged = new Map<string, VideoRecord>();
         for (const record of remoteVideos) merged.set(record.videoId, record);
@@ -188,17 +163,9 @@ export default function App() {
           if (!remote || record.updatedAt >= remote.updatedAt) merged.set(record.videoId, record);
         }
         setVideos([...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt));
-
-        const localStudy = studyStateRef.current;
-        if (remoteStudy && remoteStudy.stateUpdatedAt > localStudy.stateUpdatedAt) {
-          setFocusSessions(remoteStudy.focusSessions);
-          setDailyGoalMinutes(remoteStudy.dailyGoalMinutes);
-          setTasks(remoteStudy.tasks);
-          setStudyStateUpdatedAt(remoteStudy.stateUpdatedAt);
-        }
         setSyncedUserId(authUser.id);
         setSyncStatus('synced');
-        setSyncMessage('Your study space is synced.');
+        setSyncMessage('Your study library is synced.');
       } catch (error) {
         if (cancelled) return;
         setSyncStatus('error');
@@ -215,28 +182,14 @@ export default function App() {
       try {
         await Promise.all(videos.map((video) => saveCloudVideo(authUser.id, video)));
         setSyncStatus('synced');
-        setSyncMessage('Your study space is synced.');
+        setSyncMessage('Your study library is synced.');
       } catch (error) {
         setSyncStatus('error');
-        setSyncMessage(error instanceof Error ? error.message : 'Could not sync your watch history.');
+        setSyncMessage(error instanceof Error ? error.message : 'Could not sync your library.');
       }
     }, 1100);
     return () => window.clearTimeout(timeout);
   }, [videos, authUser?.id, syncedUserId]);
-
-  useEffect(() => {
-    if (!supabase || !authUser || syncedUserId !== authUser.id) return;
-    const timeout = window.setTimeout(async () => {
-      try {
-        await saveCloudStudyState(authUser.id, { focusSessions, dailyGoalMinutes, tasks, stateUpdatedAt: studyStateUpdatedAt });
-        setSyncStatus((status) => status === 'error' ? status : 'synced');
-      } catch (error) {
-        setSyncStatus('error');
-        setSyncMessage(error instanceof Error ? error.message : 'Could not sync your study plan.');
-      }
-    }, 1100);
-    return () => window.clearTimeout(timeout);
-  }, [focusSessions, dailyGoalMinutes, tasks, studyStateUpdatedAt, authUser?.id, syncedUserId]);
 
   useEffect(() => {
     if (!activeVideoId) return;
@@ -246,10 +199,6 @@ export default function App() {
       return upsertVideo(current, { ...existing, chaptersRaw, updatedAt: Date.now() });
     });
   }, [chaptersRaw, activeVideoId]);
-
-  useEffect(() => {
-    if (parsedChapters.length > 0 && !isPlaylist) setSidebarView('chapters');
-  }, [parsedChapters.length, isPlaylist]);
 
   useEffect(() => {
     const videoId = activeVideoId;
@@ -284,13 +233,34 @@ export default function App() {
       setPdfLoading(false);
     }
     return () => { cancelled = true; };
-  }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesRevision]);
+  }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesVersion]);
 
   useEffect(() => {
     if (!toast) return;
     const timeout = window.setTimeout(() => setToast(''), 3200);
     return () => window.clearTimeout(timeout);
   }, [toast]);
+
+  useEffect(() => {
+    if (!notesExpanded) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setNotesExpanded(false); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previous;
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [notesExpanded]);
+
+  const openTimestamps = useCallback(() => {
+    const element = timestampsRef.current;
+    if (!element) return;
+    element.open = true;
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const textarea = element.querySelector('textarea');
+    window.setTimeout(() => textarea?.focus(), 350);
+  }, []);
 
   const handlePlayerVideoChange = useCallback((info: PlayerVideoInfo) => {
     const existing = videosRef.current.find((video) => video.videoId === info.videoId);
@@ -302,7 +272,7 @@ export default function App() {
       thumbnail: `https://i.ytimg.com/vi/${info.videoId}/hqdefault.jpg`,
       playlistId: playlistIdRef.current || record.playlistId,
       playlistIndex: info.playlistIndex ?? record.playlistIndex,
-      hiddenFromRecent: false,
+      archived: false,
       updatedAt: Date.now(),
     };
     setVideos((current) => upsertVideo(current, updated));
@@ -312,10 +282,9 @@ export default function App() {
     setChaptersRaw(record.chaptersRaw || '');
     setCurrentTime(record.currentTime || 0);
     setPlayerDuration(record.duration || 0);
-    setSidebarView(parseChapters(record.chaptersRaw || '').length > 0 && !playlistIdRef.current ? 'chapters' : 'info');
+    setPanelView(record.pdfPath || notesSessionRef.current[info.videoId] ? 'notes' : parseChapters(record.chaptersRaw || '').length > 0 ? 'timestamps' : 'notes');
     setPdfError('');
     setPdfStatus('');
-    setPdfZoom(100);
     setNotesRevision((value) => value + 1);
     if (record.currentTime > 3) playerControlsRef.current?.seekTo(record.currentTime);
   }, [selectedSubject]);
@@ -340,7 +309,6 @@ export default function App() {
     const value = urlOverride ?? urlInput;
     try {
       const parsed = parseYouTubeInput(value);
-      const chosenSubject = subjectOverride ?? selectedSubject;
       playlistIdRef.current = parsed.playlistId;
       setIsPlaylist(Boolean(parsed.playlistId));
       setPlayerReady(Boolean(playerControlsRef.current));
@@ -348,23 +316,25 @@ export default function App() {
       lastProgressSaveRef.current = -1;
       setCurrentTime(0);
       setPlayerDuration(0);
-      setSidebarView('info');
       setPdfStatus('');
       setPdfError('');
+      setNotesExpanded(false);
       setUrlInput(value);
       let startPlaylistIndex: number | undefined;
       if (parsed.videoId) {
         const existing = videosRef.current.find((video) => video.videoId === parsed.videoId);
-        const record = existing ?? emptyVideoRecord(parsed.videoId, chosenSubject);
+        const record = existing ?? emptyVideoRecord(parsed.videoId, subjectOverride ?? selectedSubject);
         startPlaylistIndex = record.playlistIndex;
         if (!existing) setVideos((current) => upsertVideo(current, record));
+        else if (record.archived) updateVideo(record.videoId, { archived: false });
         setActiveVideoId(parsed.videoId);
         setChaptersRaw(record.chaptersRaw || '');
-        setSidebarView(parseChapters(record.chaptersRaw || '').length > 0 && !parsed.playlistId ? 'chapters' : 'info');
-        if (record.currentTime > 3) setTimeout(() => playerControlsRef.current?.seekTo(record.currentTime), 500);
+        setPanelView(record.pdfPath || notesSessionRef.current[parsed.videoId] ? 'notes' : parseChapters(record.chaptersRaw || '').length > 0 ? 'timestamps' : 'notes');
+        if (record.currentTime > 3) window.setTimeout(() => playerControlsRef.current?.seekTo(record.currentTime), 500);
       } else {
         setActiveVideoId(null);
         setChaptersRaw('');
+        setPanelView('notes');
       }
       loadTokenRef.current += 1;
       setSource({ ...parsed, ...(startPlaylistIndex !== undefined ? { playlistIndex: startPlaylistIndex } : {}), token: loadTokenRef.current });
@@ -398,46 +368,11 @@ export default function App() {
     }
   }
 
-  function addDoubtMarker() {
-    if (!activeVideoId) return;
-    const label = window.prompt('What do you want to revisit at this moment?', 'Revisit this concept');
-    if (!label?.trim()) return;
-    const bookmark = makeBookmark(currentTime, label.trim());
-    updateVideo(activeVideoId, { bookmarks: [...(activeRecord?.bookmarks ?? []), bookmark] });
-    setSidebarView('info');
-    showToast(`Revision marker added at ${formatTime(currentTime)}.`);
-  }
-
-  function removeBookmark(id: string) {
-    if (!activeVideoId || !activeRecord) return;
-    updateVideo(activeVideoId, { bookmarks: activeRecord.bookmarks.filter((bookmark) => bookmark.id !== id) });
-  }
-
-  function addFocusSession(minutes: number) {
-    const session: FocusSession = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, minutes, endedAt: Date.now() };
-    setFocusSessions((current) => [session, ...current].slice(0, 120));
-    markStudyChanged();
-    showToast(`${minutes}-minute focus session complete. Nice work.`);
-  }
-
-  function addStudyTask(title: string) {
-    setTasks((current) => [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title, done: false, createdAt: Date.now() }, ...current]);
-    markStudyChanged();
-  }
-
-  function toggleStudyTask(taskId: string) {
-    setTasks((current) => current.map((task) => task.id === taskId ? { ...task, done: !task.done } : task));
-    markStudyChanged();
-  }
-
-  function removeStudyTask(taskId: string) {
-    setTasks((current) => current.filter((task) => task.id !== taskId));
-    markStudyChanged();
-  }
-
-  function changeDailyGoal(value: number) {
-    setDailyGoalMinutes(value);
-    markStudyChanged();
+  function archiveVideo(record: VideoRecord) {
+    const confirmed = window.confirm(`Remove “${record.title}” from your library? Your progress stays saved and re-opening the link brings it back.`);
+    if (!confirmed) return;
+    updateVideo(record.videoId, { archived: true });
+    showToast('Removed from your library.');
   }
 
   async function downloadPdf(pdf: PdfPreview) {
@@ -482,14 +417,8 @@ export default function App() {
     if (file) void handlePdfUpload(file);
   }
 
-  function handlePdfDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const file = event.dataTransfer.files?.[0];
-    if (file) void handlePdfUpload(file);
-  }
-
   async function handlePdfUpload(file: File) {
-    notesDisclosureRef.current?.setAttribute('open', '');
+    setPanelView('notes');
     if (!activeVideoId) {
       setPdfError('Load a video before adding its notes.');
       return;
@@ -555,13 +484,9 @@ export default function App() {
     showToast('PDF notes removed.');
   }
 
-  const recentVideos = videos.filter((video) => !video.hiddenFromRecent).slice(0, 12);
-  const filteredLibrary = videos.filter((video) => {
-    if (libraryFilter === 'revision') return video.isRevision;
-    if (libraryFilter !== 'all') return video.subject === libraryFilter;
-    return true;
-  });
-  const activeBookmarkCount = activeRecord?.bookmarks.length ?? 0;
+  const libraryVideos = videos.filter((video) => !video.archived);
+  const filteredLibrary = libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
+  const availableSubjects = subjects.filter((subject) => libraryVideos.some((video) => video.subject === subject));
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
@@ -583,8 +508,31 @@ export default function App() {
     return () => document.removeEventListener('keydown', handleShortcuts);
   }, [activeVideoId]);
 
-  const currentPdf = pdfPreview;
   const progress = activeRecord ? progressPercent({ ...activeRecord, currentTime, duration: playerDuration || activeRecord.duration }) : 0;
+  const watched = formatTime(currentTime);
+
+  const loadForm = (
+    <form className="video-load-form" onSubmit={(event) => loadYouTubeVideo(event)}>
+      <div className="url-input-wrap">
+        <span className="url-play-icon"><Play size={15} fill="currentColor" /></span>
+        <input
+          aria-label="YouTube video or playlist URL"
+          value={urlInput}
+          onChange={(event) => { setUrlInput(event.target.value); setUrlError(''); }}
+          placeholder="Paste a YouTube one-shot or playlist link…"
+        />
+        <span className="url-helper">YOUTUBE</span>
+      </div>
+      <label className="subject-select-label">
+        <span className="sr-only">Subject</span>
+        <select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a JEE subject">
+          {subjects.map((subject) => <option key={subject}>{subject}</option>)}
+        </select>
+        <ChevronDown size={13} />
+      </label>
+      <button className="button-primary load-button" type="submit"><span>{source ? 'Load video' : 'Start studying'}</span><ArrowRight size={17} /></button>
+    </form>
+  );
 
   return (
     <div className="app-shell">
@@ -607,7 +555,7 @@ export default function App() {
             </div>
             {authUser ? (
               <div className="account-controls">
-                <button className="account-chip" onClick={() => showToast(syncMessage || 'Your study library is synced to this account.')} title={authUser.email || 'Account settings'}><span className="account-avatar">{(authUser.email || 'S').slice(0, 1).toUpperCase()}</span><span className="account-email">{authUser.email}</span><ChevronDown size={13} /></button>
+                <button className="account-chip" onClick={() => showToast(syncMessage || 'Your library is synced to this account.')} title={authUser.email || 'Account settings'}><span className="account-avatar">{(authUser.email || 'S').slice(0, 1).toUpperCase()}</span><span className="account-email">{authUser.email}</span><ChevronDown size={13} /></button>
                 <button className="sign-out-button" onClick={() => void handleSignOut()}>Sign out</button>
               </div>
             ) : (
@@ -617,42 +565,45 @@ export default function App() {
         </header>
 
         <main id="top">
-          <section className={`hero ${activeVideoId ? 'hero-compact' : ''}`}>
-            <div className="hero-copy">
-              <p className="eyebrow hero-eyebrow"><span className="live-dot" /> A LITTLE MORE FOCUS, A LOT MORE FLOW</p>
-              <h1>{activeVideoId ? <>Make this one-shot <em>count.</em></> : <>Your JEE one-shots,<br className="desktop-break" /> with a <em>study plan.</em></>}</h1>
-              <p className="hero-description">Study JEE lessons with chapters, notes, and a focus timer—all in one calm workspace.</p>
-            </div>
-            <form className="video-load-form" onSubmit={(event) => loadYouTubeVideo(event)}>
-              <div className="url-input-wrap"><span className="url-play-icon"><Play size={15} fill="currentColor" /></span><input aria-label="YouTube video or playlist URL" value={urlInput} onChange={(event) => { setUrlInput(event.target.value); setUrlError(''); }} placeholder="Paste a YouTube one-shot or playlist link…" /><span className="url-helper">YOUTUBE</span></div>
-              <label className="subject-select-label"><span className="sr-only">Subject</span><select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a JEE subject">{subjects.map((subject) => <option key={subject}>{subject}</option>)}</select><ChevronDown size={13} /></label>
-              <button className="button-primary load-button" type="submit"><span>{activeVideoId ? 'Load video' : 'Start studying'}</span><ArrowRight size={17} /></button>
-            </form>
-            {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
-            {syncStatus === 'error' && <p className="cloud-warning"><CloudOff size={14} /> Cloud sync paused. Your local browser copy is still available. <span title={syncMessage}>Details</span></p>}
-          </section>
+          {!source ? (
+            <section className="hero">
+              <div className="hero-copy">
+                <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
+                <h1>Your JEE one-shots,<br className="desktop-break" /> with your <em>notes open.</em></h1>
+                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device.</p>
+              </div>
+              {loadForm}
+              {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
+              {syncStatus === 'error' && <p className="cloud-warning"><CloudOff size={14} /> Cloud sync paused. Your local browser copy is still available. <span title={syncMessage}>Details</span></p>}
+            </section>
+          ) : (
+            <section className="load-bar">
+              {loadForm}
+              {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
+            </section>
+          )}
 
           {!source && (
             <section className="welcome-section">
-              <div className="welcome-heading"><span className="welcome-kicker">GET STARTED IN THREE SIMPLE STEPS</span><span className="welcome-line" /></div>
+              <div className="welcome-heading"><span className="welcome-kicker">THREE STEPS, THEN JUST FOCUS</span><span className="welcome-line" /></div>
               <div className="welcome-cards">
                 <article className="welcome-card">
                   <div className="welcome-icon mint"><Film size={20} /></div>
                   <span className="welcome-number">01</span>
                   <h3>Paste a lesson</h3>
-                  <p>Start with any YouTube video or playlist.</p>
+                  <p>Any YouTube one-shot or playlist starts the room.</p>
                 </article>
                 <article className="welcome-card">
                   <div className="welcome-icon lavender"><ListMusic size={20} /></div>
                   <span className="welcome-number">02</span>
-                  <h3>Pick up the key ideas</h3>
-                  <p>Jump with chapters, save notes, and mark tricky moments.</p>
+                  <h3>Add the timestamps</h3>
+                  <p>Paste the chapter list once and jump to any topic instantly.</p>
                 </article>
                 <article className="welcome-card">
-                  <div className="welcome-icon amber"><Target size={20} /></div>
+                  <div className="welcome-icon amber"><FileText size={20} /></div>
                   <span className="welcome-number">03</span>
-                  <h3>Focus at your pace</h3>
-                  <p>Set a timer and keep your study progress together.</p>
+                  <h3>Keep notes beside the video</h3>
+                  <p>Attach a PDF and read it side by side, on desktop and mobile.</p>
                 </article>
               </div>
               <div className="welcome-footnote"><ShieldCheck size={16} /> No demo videos. Your space is yours to fill.</div>
@@ -660,172 +611,147 @@ export default function App() {
           )}
 
           {source && (
-            <section className="workspace" aria-label="YouTube study room">
-              <div className="workspace-main">
-                <article className="player-card glass-card">
-                  <div className="player-topline"><div className="player-live-label"><span className="live-dot" /> STUDY ROOM <span className="topline-slash">/</span> <span>{isPlaylist ? 'PLAYLIST' : 'NOW PLAYING'}</span></div><div className={`player-state ${playerError ? 'error' : playerState === 1 ? 'playing' : ''}`}><span />{playerError ? 'Check video details' : playerState === 1 ? 'In session' : playerReady ? 'Ready when you are' : 'Connecting'}</div></div>
-                  <YouTubePlayer
-                    source={source}
-                    controlsRef={playerControlsRef}
-                    onReady={onPlayerReady}
-                    onStateChange={onPlayerStateChange}
-                    onVideoChange={handlePlayerVideoChange}
-                    onTick={handlePlayerTick}
-                    onError={onPlayerError}
-                  />
-                  <div className="player-meta">
-                    <div className="player-title-wrap">
-                      <span className={`subject-tag ${subjectClass(activeRecord?.subject ?? selectedSubject)}`}>{activeRecord?.subject ?? selectedSubject}</span>
-                      <h2>{activeRecord?.title || 'Your lesson is loading…'}</h2>
-                      <p>{activeRecord?.channel || 'YouTube study session'} <span>·</span> {playerDuration ? formatTime(playerDuration) : 'Duration appears when the video is ready'}</p>
-                    </div>
-                    <div className="player-meta-actions">
-                      <button className={`round-action ${activeRecord?.isRevision ? 'saved' : ''}`} onClick={() => activeVideoId && updateVideo(activeVideoId, { isRevision: !activeRecord?.isRevision })} aria-label={activeRecord?.isRevision ? 'Remove from revision shelf' : 'Save to revision shelf'} title={activeRecord?.isRevision ? 'Saved to revision shelf' : 'Save for revision'}><Bookmark size={16} fill={activeRecord?.isRevision ? 'currentColor' : 'none'} /></button>
-                      <button className="bookmark-action" onClick={addDoubtMarker}><MessageSquarePlus size={15} /><span>Mark a doubt</span></button>
-                    </div>
+            <section className={`workspace ${notesExpanded ? 'notes-expanded' : ''}`} aria-label="YouTube study room">
+              <article className="player-card glass-card workspace-player">
+                <div className="player-topline"><div className="player-live-label"><span className="live-dot" /> STUDY ROOM <span className="topline-slash">/</span> <span>{isPlaylist ? 'PLAYLIST' : 'NOW PLAYING'}</span></div><div className={`player-state ${playerError ? 'error' : playerState === 1 ? 'playing' : ''}`}><span />{playerError ? 'Check video details' : playerState === 1 ? 'In session' : playerReady ? 'Ready when you are' : 'Connecting'}</div></div>
+                <YouTubePlayer
+                  source={source}
+                  controlsRef={playerControlsRef}
+                  onReady={onPlayerReady}
+                  onStateChange={onPlayerStateChange}
+                  onVideoChange={handlePlayerVideoChange}
+                  onTick={handlePlayerTick}
+                  onError={onPlayerError}
+                />
+                <div className="player-meta">
+                  <div className="player-title-wrap">
+                    <span className={`subject-tag ${subjectClass(activeSubject)}`}>{activeSubject}</span>
+                    <h2>{activeTitle}</h2>
+                    <p>{activeRecord?.channel || 'YouTube study session'} <span>·</span> {playerDuration ? formatTime(playerDuration) : 'Duration appears when the video is ready'}</p>
                   </div>
-                  <div className="player-progress"><span style={{ width: `${progress}%` }} /></div>
-                  <details className="shortcut-disclosure">
-                    <summary><span><Zap size={15} /> Keyboard shortcuts</span><span className="shortcut-summary-action">Show <ChevronDown size={15} /></span></summary>
-                    <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
-                  </details>
-                </article>
-
-                <details className="chapters-editor disclosure-card glass-card">
-                  <summary className="disclosure-summary">
-                    <span className="section-title-lockup">
-                      <span className="section-icon violet"><ListMusic size={20} /></span>
-                      <span className="disclosure-copy"><span className="eyebrow">OPTIONAL</span><span className="disclosure-title">Chapter map</span><span className="disclosure-subtitle">{parsedChapters.length ? 'Timestamps are ready to jump to' : 'Add timestamps to jump to a topic'}</span></span>
-                    </span>
-                    <span className="disclosure-summary-end"><span className="chapter-count">{parsedChapters.length} {parsedChapters.length === 1 ? 'CHAPTER' : 'CHAPTERS'}</span><span className="disclosure-chevron"><ChevronDown size={18} /></span></span>
-                  </summary>
-                  <div className="disclosure-body">
-                    <div className="chapter-editor-toolbar"><p className="section-description">Paste the timestamps from your video description. Chapters save automatically for this lesson.</p><a className="description-link" href="https://www.toolsoverflow.com/youtube/youtube-title-description-extractor" target="_blank" rel="noreferrer">Find timestamps <ArrowUpRight size={14} /></a></div>
-                    <textarea className="chapters-textarea" value={chaptersRaw} onChange={(event) => setChaptersRaw(event.target.value)} placeholder={'00:00 Introduction\n08:00 - Kinematics\n01:19:42 Work, energy and power'} spellCheck={false} aria-label="Paste video timestamps and chapter titles" />
-                    <div className="chapter-editor-footer"><span><Info size={14} /> One timestamp per line · MM:SS or HH:MM:SS</span><span className={parsedChapters.length ? 'parse-success' : ''}>{parsedChapters.length ? <><Check size={14} /> Saved for this video</> : 'Private to this video'}</span></div>
+                  <div className="player-meta-actions">
+                    <span className="watch-time"><span>WATCHED</span><strong>{watched}{playerDuration ? ` / ${formatTime(playerDuration)}` : ''}</strong></span>
+                    <button className="notes-jump" onClick={() => { setPanelView('notes'); document.querySelector('.study-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}><FileText size={15} /> Notes</button>
                   </div>
+                </div>
+                <div className="player-progress"><span style={{ width: `${progress}%` }} /></div>
+                <details className="shortcut-disclosure">
+                  <summary><span><Zap size={15} /> Keyboard shortcuts</span><span className="shortcut-summary-action">Show <ChevronDown size={15} /></span></summary>
+                  <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
                 </details>
+              </article>
 
-                <details ref={notesDisclosureRef} className="notes-card disclosure-card glass-card">
-                  <summary className="disclosure-summary">
-                    <span className="section-title-lockup">
-                      <span className="section-icon amber"><FileText size={20} /></span>
-                      <span className="disclosure-copy"><span className="eyebrow">OPTIONAL</span><span className="disclosure-title">Video notes</span><span className="disclosure-subtitle">{pdfPreview?.name ?? (activeRecord?.pdfPath && !authUser ? 'Private notes · sign in to open' : pdfLoading ? 'Loading saved notes…' : 'Attach a PDF to read beside the video')}</span></span>
-                    </span>
-                    <span className="disclosure-summary-end"><span className={pdfPreview || activeRecord?.pdfPath || sessionPdf ? 'notes-status ready' : 'notes-status'}>{pdfPreview ? 'PDF READY' : activeRecord?.pdfPath || sessionPdf ? 'SAVED' : 'ADD PDF'}</span><span className="disclosure-chevron"><ChevronDown size={18} /></span></span>
-                  </summary>
-                  <div className="disclosure-body notes-disclosure-body">
-                    {pdfPreview && <div className="notes-card-action-row"><span><Check size={15} /> Notes attached to this video</span><button className="text-button remove-pdf" onClick={() => void deletePdf()} disabled={pdfBusy}><Trash2 size={15} /> Remove</button></div>}
-                    {!pdfPreview && activeRecord?.pdfPath && !authUser && !sessionPdf ? (
-                      <div className="pdf-file-row locked-pdf-row"><div className="pdf-file-icon"><LockKeyhole size={19} /></div><div className="pdf-file-info"><strong title={activeRecord.pdfName}>{activeRecord.pdfName || 'Private PDF notes'}</strong><span>{formatBytes(activeRecord.pdfSize)} <i /> Saved to a private account</span></div><button className="replace-pdf-button" onClick={() => setAuthOpen(true)}><Cloud size={14} /> Sign in</button></div>
-                    ) : !pdfPreview ? (
-                      <div className={`pdf-dropzone ${pdfBusy ? 'is-uploading' : ''}`} role="button" tabIndex={0} onClick={() => fileInputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') fileInputRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={handlePdfDrop} aria-label="Upload a PDF for this video">
-                        <div className="upload-icon-wrap"><Upload size={20} /></div>
-                        <div className="pdf-drop-copy"><strong>{pdfBusy ? 'Reading your notes…' : 'Drop your notes PDF here'}</strong><span>or <b>browse files</b> · PDF only · up to 100 MB</span></div>
-                        <span className="upload-arrow"><ChevronRight size={18} /></span>
-                      </div>
-                    ) : (
-                      <div className="pdf-file-row">
-                        <div className="pdf-file-icon"><FileText size={20} /></div>
-                        <div className="pdf-file-info"><strong title={pdfPreview.name}>{pdfPreview.name}</strong><span>{formatBytes(pdfPreview.size)} <i /> {pdfPreview.cloud ? 'Saved to your private cloud library' : 'Available for this session'}</span></div>
-                        <button className="replace-pdf-button" onClick={() => fileInputRef.current?.click()} disabled={pdfBusy}><RotateCcw size={14} /> Replace</button>
-                      </div>
-                    )}
-                    {pdfBusy && <div className="upload-progress"><span /></div>}
-                    {pdfError && <p className="pdf-error" role="alert"><Info size={14} /> {pdfError}</p>}
-                    <div className="pdf-storage-note"><span className={pdfPreview?.cloud ? 'storage-cloud' : 'storage-session'}>{pdfPreview?.cloud ? <Cloud size={15} /> : <Info size={15} />}</span><span>{pdfStatus || (activeRecord?.pdfPath && !authUser && !sessionPdf ? 'Sign in to access this private cloud PDF.' : authUser ? 'PDFs attached to this video sync privately with your account.' : 'Session storage — notes are kept while the page is open.')}</span></div>
-                    {pdfPreview && <button className="open-pdf-inline" onClick={() => setSidebarView('notes')}><BookOpen size={15} /> Open notes beside the video <ArrowRight size={14} /></button>}
-                    {pdfLoading && <p className="pdf-loading-message"><span className="mini-spinner" /> Fetching your cloud notes…</p>}
-                  </div>
-                </details>
-                <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
-              </div>
-
-              <aside className="workspace-aside">
-                <section className="sidebar-card glass-card">
-                  <div className="sidebar-heading"><div><p className="eyebrow">YOUR STUDY COMPANION</p><h3>Study space</h3></div><span className="sidebar-glow"><Sparkles size={16} /></span></div>
-                  <div className="sidebar-tabs" role="tablist" aria-label="Study companion panels">
-                    <button className={sidebarView === 'info' ? 'active' : ''} onClick={() => setSidebarView('info')} role="tab" aria-selected={sidebarView === 'info'}><Info size={14} /> Info</button>
-                    <button className={sidebarView === 'chapters' ? 'active' : ''} onClick={() => setSidebarView('chapters')} role="tab" aria-selected={sidebarView === 'chapters'}><ListMusic size={14} /> Chapters{parsedChapters.length > 0 && <span className="tab-count">{parsedChapters.length}</span>}</button>
-                    <button className={sidebarView === 'notes' ? 'active' : ''} onClick={() => setSidebarView('notes')} role="tab" aria-selected={sidebarView === 'notes'}><FileText size={14} /> Notes{pdfPreview && <span className="tab-dot" />}</button>
-                  </div>
-                  <div className="sidebar-panel" role="tabpanel">
-                    {sidebarView === 'chapters' && <ChaptersPanel chapters={parsedChapters} activeIndex={activeChapterIndex} currentTime={currentTime} onSeek={(seconds) => playerControlsRef.current?.seekTo(seconds)} compact />}
-                    {sidebarView === 'info' && (
-                      <div className="video-info-panel">
-                        <div className="info-video-card"><div className={`info-subject-icon ${subjectClass(activeRecord?.subject ?? selectedSubject)}`}><BookOpen size={16} /></div><div><span>STUDYING</span><strong>{activeRecord?.subject ?? selectedSubject}</strong></div><button className={`revision-toggle ${activeRecord?.isRevision ? 'checked' : ''}`} onClick={() => activeVideoId && updateVideo(activeVideoId, { isRevision: !activeRecord?.isRevision })} title="Toggle revision shelf"><Bookmark size={14} fill={activeRecord?.isRevision ? 'currentColor' : 'none'} /></button></div>
-                        <div className="info-stat-row"><div><span>WATCHED</span><strong>{formatTime(currentTime)}</strong></div><div><span>VIDEO LENGTH</span><strong>{playerDuration ? formatTime(playerDuration) : '—'}</strong></div></div>
-                        <div className="info-progress-wrap"><div className="info-progress-track"><span style={{ width: `${progress}%` }} /></div><span>{Math.round(progress)}% complete</span></div>
-                        <div className="sidebar-divider" />
-                        <div className="bookmark-list-heading"><div><p className="eyebrow">CONCEPTS TO REVISIT</p><h4>Revision markers</h4></div><span>{activeBookmarkCount}</span></div>
-                        {activeBookmarkCount > 0 ? <div className="bookmark-list">{activeRecord?.bookmarks.map((bookmark) => <div className="bookmark-row" key={bookmark.id}><button onClick={() => playerControlsRef.current?.seekTo(bookmark.seconds)}><span className="bookmark-time">{formatTime(bookmark.seconds)}</span><span className="bookmark-name">{bookmark.label}</span><ChevronRight size={13} /></button><button className="bookmark-delete" aria-label={`Remove ${bookmark.label}`} onClick={() => removeBookmark(bookmark.id)}><X size={13} /></button></div>)}</div> : <div className="no-bookmarks"><MessageSquarePlus size={16} /><span>Mark tricky moments as you watch. They will be saved with this video.</span></div>}
-                        <button className="add-marker-button" onClick={addDoubtMarker}><Plus size={14} /> Add a timestamped doubt</button>
-                        <a className="description-link info-description-link" href="https://www.toolsoverflow.com/youtube/youtube-title-description-extractor" target="_blank" rel="noreferrer">Find video timestamps <ArrowUpRight size={13} /></a>
-                      </div>
-                    )}
-                    {sidebarView === 'notes' && (
-                      <div className="notes-preview-panel">
-                        {pdfLoading && <div className="notes-view-empty"><span className="mini-spinner" /><strong>Loading your notes…</strong></div>}
-                        {!pdfLoading && currentPdf && <>
-                          <div className="pdf-toolbar"><span title={currentPdf.name}><FileText size={13} /> {currentPdf.name}</span><div className="pdf-toolbar-actions"><button onClick={() => setPdfZoom((zoom) => Math.max(50, zoom - 25))} aria-label="Zoom out" disabled={pdfZoom <= 50}>−</button><b>{pdfZoom}%</b><button onClick={() => setPdfZoom((zoom) => Math.min(200, zoom + 25))} aria-label="Zoom in" disabled={pdfZoom >= 200}>+</button><button onClick={() => void downloadPdf(currentPdf)} aria-label="Download notes"><ArrowDownToLine size={14} /></button><a href={currentPdf.url} target="_blank" rel="noreferrer" aria-label="Open notes in a new tab"><Maximize2 size={13} /></a></div></div>
-                          <div className="pdf-frame-wrap"><iframe key={`${currentPdf.url}-${pdfZoom}`} src={`${currentPdf.url}#zoom=${pdfZoom}`} title={`${currentPdf.name} PDF notes`} /></div>
-                          <p className="pdf-view-status">{currentPdf.cloud ? <Cloud size={12} /> : <Info size={12} />}{currentPdf.cloud ? ' Private cloud copy' : ' Session-only PDF'} · {formatBytes(currentPdf.size)}</p>
-                        </>}
-                        {!pdfLoading && !currentPdf && <div className="notes-view-empty"><div className="empty-panel-icon"><FileText size={18} /></div><strong>{activeRecord?.pdfPath && !authUser ? 'Private cloud notes' : 'No notes attached yet'}</strong><p>{activeRecord?.pdfPath && !authUser ? 'Sign in to the account that saved this PDF to open it here.' : "Upload this lesson's PDF below the player. You can read it here without leaving the video."}</p>{activeRecord?.pdfPath && !authUser ? <button className="button-outline small-outline" onClick={() => setAuthOpen(true)}><Cloud size={13} /> Sign in to open notes</button> : <button className="button-outline small-outline" onClick={() => fileInputRef.current?.click()}><Upload size={13} /> Upload a PDF</button>}</div>}
-                      </div>
-                    )}
-                  </div>
-                </section>
-                <FocusTools sessions={focusSessions} goalMinutes={dailyGoalMinutes} tasks={tasks} onComplete={addFocusSession} onGoalChange={changeDailyGoal} onAddTask={addStudyTask} onToggleTask={toggleStudyTask} onRemoveTask={removeStudyTask} />
-                <div className="keyboard-note"><Headphones size={14} /><span>Put your phone away. Let the timer do the nudging.</span></div>
+              <aside className="study-panel glass-card">
+                <div className="panel-tabs" role="tablist" aria-label="Notes and timestamps">
+                  <button role="tab" aria-selected={panelView === 'notes'} className={panelView === 'notes' ? 'active' : ''} onClick={() => setPanelView('notes')}><FileText size={16} /> Notes{pdfPreview && <span className="tab-dot" />}</button>
+                  <button role="tab" aria-selected={panelView === 'timestamps'} className={panelView === 'timestamps' ? 'active' : ''} onClick={() => { setPanelView('timestamps'); setNotesExpanded(false); }}><ListMusic size={16} /> Timestamps{parsedChapters.length > 0 && <span className="tab-count">{parsedChapters.length}</span>}</button>
+                </div>
+                <div className="panel-body" role="tabpanel">
+                  {panelView === 'notes' ? (
+                    <PdfViewer
+                      url={pdfPreview?.url ?? ''}
+                      name={pdfPreview?.name ?? activeRecord?.pdfName ?? ''}
+                      size={pdfPreview?.size ?? activeRecord?.pdfSize ?? 0}
+                      cloud={pdfPreview?.cloud ?? false}
+                      uploading={pdfBusy || pdfLoading}
+                      error={pdfError}
+                      status={pdfStatus}
+                      locked={Boolean(activeRecord?.pdfPath && !authUser && !sessionPdf)}
+                      expanded={notesExpanded}
+                      onPickFile={() => fileInputRef.current?.click()}
+                      onFile={(file) => void handlePdfUpload(file)}
+                      onRemove={() => void deletePdf()}
+                      onDownload={() => pdfPreview && void downloadPdf(pdfPreview)}
+                      onSignIn={() => setAuthOpen(true)}
+                      onToggleExpand={() => setNotesExpanded((value) => !value)}
+                    />
+                  ) : (
+                    <ChaptersPanel
+                      chapters={parsedChapters}
+                      activeIndex={activeChapterIndex}
+                      currentTime={currentTime}
+                      onSeek={(seconds) => playerControlsRef.current?.seekTo(seconds)}
+                      onAddTimestamps={openTimestamps}
+                      compact
+                    />
+                  )}
+                </div>
+                {notesExpanded && <button className="panel-close" onClick={() => setNotesExpanded(false)} aria-label="Exit full screen notes"><X size={16} /> Close</button>}
               </aside>
+
+              <details ref={timestampsRef} className="timestamps-editor disclosure-card glass-card workspace-editor">
+                <summary className="disclosure-summary">
+                  <span className="section-title-lockup">
+                    <span className="section-icon violet"><ListMusic size={20} /></span>
+                    <span className="disclosure-copy"><span className="eyebrow">TIMESTAMPS</span><span className="disclosure-title">Chapter map</span><span className="disclosure-subtitle">{parsedChapters.length ? 'Saved — tap any timestamp to jump' : 'Paste timestamps to jump to a topic'}</span></span>
+                  </span>
+                  <span className="disclosure-summary-end"><span className="chapter-count">{parsedChapters.length} {parsedChapters.length === 1 ? 'CHAPTER' : 'CHAPTERS'}</span><span className="disclosure-chevron"><ChevronDown size={18} /></span></span>
+                </summary>
+                <div className="disclosure-body">
+                  <div className="chapter-editor-toolbar"><p className="section-description">Paste the timestamps from your video description. They save automatically for this lesson.</p><a className="description-link" href="https://www.toolsoverflow.com/youtube/youtube-title-description-extractor" target="_blank" rel="noreferrer">Find timestamps <ArrowUpRight size={14} /></a></div>
+                  <textarea className="chapters-textarea" value={chaptersRaw} onChange={(event) => setChaptersRaw(event.target.value)} placeholder={'00:00 Introduction\n08:00 - Kinematics\n01:19:42 Work, energy and power'} spellCheck={false} aria-label="Paste video timestamps and chapter titles" />
+                  <div className="chapter-editor-footer"><span><Info size={14} /> One timestamp per line · MM:SS or HH:MM:SS</span><span className={parsedChapters.length ? 'parse-success' : ''}>{parsedChapters.length ? <><Check size={14} /> Saved for this video</> : 'Private to this video'}</span></div>
+                </div>
+              </details>
             </section>
           )}
 
-          {recentVideos.length > 0 && <ContinueWatching videos={recentVideos} currentVideoId={activeVideoId} onResume={resumeVideo} onDismiss={(videoId) => updateVideo(videoId, { hiddenFromRecent: true })} />}
-
-          {videos.length > 0 && (
+          {libraryVideos.length > 0 && (
             <section className="library-section">
-              <div className="library-heading"><div><p className="eyebrow">YOUR PERSONAL STUDY LIBRARY</p><h2>Pick up where you left off</h2><p>Every video keeps its chapters, progress, and revision markers together.</p></div><span className="library-count"><span>{videos.length.toString().padStart(2, '0')}</span> SAVED</span></div>
-              <div className="library-filters"><button className={libraryFilter === 'all' ? 'selected' : ''} onClick={() => setLibraryFilter('all')}>All videos <span>{videos.length}</span></button>{subjects.filter((subject) => videos.some((video) => video.subject === subject)).map((subject) => <button key={subject} className={libraryFilter === subject ? 'selected' : ''} onClick={() => setLibraryFilter(subject)}>{subject}</button>)}<button className={libraryFilter === 'revision' ? 'selected revision-filter' : 'revision-filter'} onClick={() => setLibraryFilter('revision')}><Bookmark size={12} /> Revision shelf</button></div>
-              <div className="library-grid">
-                {filteredLibrary.slice(0, 8).map((video) => <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onToggleRevision={() => updateVideo(video.videoId, { isRevision: !video.isRevision })} />)}
-                {filteredLibrary.length === 0 && <div className="library-empty">No videos in this shelf yet. Save a video for revision with the bookmark icon.</div>}
+              <div className="library-heading">
+                <div>
+                  <p className="eyebrow">YOUR LIBRARY</p>
+                  <h2>Pick up where you left off</h2>
+                  <p>Timestamps, notes and progress stay with every lesson.</p>
+                </div>
+                <span className="library-count"><span>{libraryVideos.length.toString().padStart(2, '0')}</span> SAVED</span>
               </div>
-              {filteredLibrary.length > 8 && <p className="library-more">Showing your 8 most recent videos · {filteredLibrary.length} total</p>}
+              <div className="library-filters">
+                <button className={libraryFilter === 'all' ? 'selected' : ''} onClick={() => setLibraryFilter('all')}>All lessons <span>{libraryVideos.length}</span></button>
+                {availableSubjects.map((subject) => <button key={subject} className={libraryFilter === subject ? 'selected' : ''} onClick={() => setLibraryFilter(subject)}>{subject} <span>{libraryVideos.filter((video) => video.subject === subject).length}</span></button>)}
+              </div>
+              <div className="library-grid">
+                {filteredLibrary.map((video) => (
+                  <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
+                ))}
+                {filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
+              </div>
             </section>
           )}
 
           <footer className="footer"><a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a><p>Made for your next breakthrough. Videos are streamed by YouTube.</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a></footer>
         </main>
       </div>
+      <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
       {toast && <div className="toast-message"><span><Check size={14} /></span>{toast}</div>}
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
     </div>
   );
 }
 
-function ContinueWatching({ videos, currentVideoId, onResume, onDismiss }: { videos: VideoRecord[]; currentVideoId: string | null; onResume: (record: VideoRecord) => void; onDismiss: (videoId: string) => void }) {
-  return (
-    <section className="continue-section">
-      <div className="continue-heading"><div><p className="eyebrow">A FEW MINUTES CAN TAKE YOU FAR</p><h2>Continue watching</h2></div><span className="continue-count">{String(videos.length).padStart(2, '0')} <span>RECENT</span></span></div>
-      <div className="continue-row">
-        {videos.map((video) => <article className={`continue-card ${video.videoId === currentVideoId ? 'currently-open' : ''}`} key={video.videoId}>
-          <button className="continue-dismiss" onClick={() => onDismiss(video.videoId)} aria-label={`Dismiss ${video.title} from continue watching`} title="Hide from recent"><X size={13} /></button>
-          <button className="continue-thumb" onClick={() => onResume(video)} aria-label={`Resume ${video.title}`}><img src={video.thumbnail} alt="" loading="lazy" /><span className="continue-play"><Play size={15} fill="currentColor" /></span><span className={`subject-mini ${subjectClass(video.subject)}`}>{video.subject}</span><span className="continue-progress"><i style={{ width: `${progressPercent(video)}%` }} /></span></button>
-          <div className="continue-card-copy"><span>{video.videoId === currentVideoId ? 'OPEN NOW' : relativeDate(video.updatedAt)}</span><button onClick={() => onResume(video)}>{video.title}</button><div><span>{formatTime(video.currentTime)}{video.duration ? ` / ${formatTime(video.duration)}` : ''}</span><button onClick={() => onResume(video)}><RotateCcw size={12} /> Resume</button></div></div>
-        </article>)}
-      </div>
-      <p className="continue-hint"><ChevronRight size={13} /> Scroll sideways to explore your recent one-shots</p>
-    </section>
-  );
-}
-
-function LibraryCard({ video, active, onResume, onToggleRevision }: { video: VideoRecord; active: boolean; onResume: () => void; onToggleRevision: () => void }) {
+function LibraryCard({ video, active, onResume, onRemove }: { video: VideoRecord; active: boolean; onResume: () => void; onRemove: () => void }) {
+  const percent = Math.round(progressPercent(video));
   return (
     <article className={`library-card glass-card ${active ? 'library-card-active' : ''}`}>
-      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}><img src={video.thumbnail} alt="" loading="lazy" /><span className="library-play"><Play size={14} fill="currentColor" /></span><span className="library-duration">{video.duration ? formatTime(video.duration) : video.subject}</span></button>
-      <div className="library-card-body"><div className="library-card-overline"><span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span><button onClick={onToggleRevision} className={video.isRevision ? 'revision-card-button selected' : 'revision-card-button'} aria-label={video.isRevision ? 'Remove from revision shelf' : 'Add to revision shelf'}><Bookmark size={14} fill={video.isRevision ? 'currentColor' : 'none'} /></button></div><button className="library-video-title" onClick={onResume}>{video.title}</button><p>{video.channel || 'YouTube lesson'}</p><div className="library-card-progress"><div className="progress-track"><span style={{ width: `${progressPercent(video)}%` }} /></div><span>{Math.round(progressPercent(video))}%</span></div><button className="library-resume-button" onClick={onResume}>Resume lesson <ArrowRight size={13} /></button></div>
+      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}>
+        <img src={video.thumbnail} alt="" loading="lazy" />
+        <span className="library-play"><Play size={14} fill="currentColor" /></span>
+        <span className="library-duration">{video.duration ? formatTime(video.duration) : video.subject}</span>
+        {active && <span className="library-live">OPEN NOW</span>}
+      </button>
+      <div className="library-card-body">
+        <div className="library-card-overline">
+          <span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span>
+          <span className="library-card-tools">
+            {video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
+            <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
+          </span>
+        </div>
+        <button className="library-video-title" onClick={onResume}>{video.title}</button>
+        <p>{video.channel || 'YouTube lesson'}</p>
+        <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
+        <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+      </div>
     </article>
   );
 }

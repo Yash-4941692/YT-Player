@@ -1,4 +1,8 @@
 -- Focusframe JEE study player: run this once in Supabase SQL Editor.
+-- Legacy columns (kept so existing projects keep working): is_revision and bookmarks are no
+-- longer written by the app, and the study_state table is unused. They can be dropped later.
+-- The app only reads/writes watch_items (lessons, progress, chapters, PDF pointers) and the
+-- private video-notes bucket.
 -- Never put a Supabase service_role key in the browser or in Vercel's VITE_* variables.
 
 create table if not exists public.watch_items (
