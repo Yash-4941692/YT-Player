@@ -76,8 +76,6 @@ export function emptyVideoRecord(videoId: string, subject: Subject = 'Physics'):
     currentTime: 0,
     duration: 0,
     subject,
-    isRevision: false,
-    bookmarks: [],
     updatedAt: Date.now(),
   };
 }

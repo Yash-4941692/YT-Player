@@ -2,13 +2,7 @@ import type { PersistedState, Subject, VideoRecord } from '../types';
 
 const STORAGE_KEY = 'focusframe.jee.v1';
 
-const initialState: PersistedState = {
-  videos: [],
-  focusSessions: [],
-  dailyGoalMinutes: 180,
-  tasks: [],
-  stateUpdatedAt: Date.now(),
-};
+const initialState: PersistedState = { videos: [] };
 
 function isSubject(value: unknown): value is Subject {
   return value === 'Physics' || value === 'Chemistry' || value === 'Mathematics' || value === 'Other';
@@ -29,9 +23,7 @@ function normalizeVideo(value: unknown): VideoRecord | null {
     currentTime: Number.isFinite(item.currentTime) ? Number(item.currentTime) : 0,
     duration: Number.isFinite(item.duration) ? Number(item.duration) : 0,
     subject: isSubject(item.subject) ? item.subject : 'Other',
-    isRevision: Boolean(item.isRevision),
-    hiddenFromRecent: Boolean(item.hiddenFromRecent),
-    bookmarks: Array.isArray(item.bookmarks) ? item.bookmarks : [],
+    archived: Boolean(item.archived),
     pdfPath: typeof item.pdfPath === 'string' ? item.pdfPath : undefined,
     pdfName: typeof item.pdfName === 'string' ? item.pdfName : undefined,
     pdfSize: Number.isFinite(item.pdfSize) ? Number(item.pdfSize) : undefined,
@@ -47,13 +39,7 @@ export function loadLocalState(): PersistedState {
     const videos = Array.isArray(parsed.videos)
       ? parsed.videos.map(normalizeVideo).filter((item): item is VideoRecord => item !== null)
       : [];
-    return {
-      videos,
-      focusSessions: Array.isArray(parsed.focusSessions) ? parsed.focusSessions : [],
-      dailyGoalMinutes: Number.isFinite(parsed.dailyGoalMinutes) ? Math.min(1440, Math.max(15, Number(parsed.dailyGoalMinutes))) : 180,
-      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
-      stateUpdatedAt: Number.isFinite(parsed.stateUpdatedAt) ? Number(parsed.stateUpdatedAt) : Date.now(),
-    };
+    return { videos };
   } catch {
     return initialState;
   }
