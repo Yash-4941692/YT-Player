@@ -49,3 +49,22 @@ export interface SessionPdf {
 }
 
 export type StudyPanelView = 'notes' | 'timestamps';
+
+/**
+ * A PDF in the user's personal library.
+ *
+ * `storagePath` is the path inside the private Supabase bucket for account-backed
+ * PDFs. Items uploaded while browsing as a guest have no cloud copy yet: they are
+ * marked `sessionOnly` and keep the raw `file` in memory for the current tab.
+ */
+export interface LibraryPdf {
+  id: string;
+  name: string;
+  subject: Subject;
+  size: number;
+  storagePath: string;
+  createdAt: number;
+  updatedAt: number;
+  sessionOnly?: boolean;
+  file?: File;
+}

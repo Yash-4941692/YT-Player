@@ -6,12 +6,19 @@ import {
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
+import { PdfLibraryPanel } from './components/PdfLibraryPanel';
+import { PdfLibraryViewer } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
-import { cloudConfigured, createPdfSignedUrl, deleteCloudPdf, fetchCloudVideos, saveCloudVideo, supabase, uploadCloudPdf } from './lib/supabase';
+import {
+  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteLibraryPdf,
+  fetchCloudVideos, fetchLibraryPdfs, isLibraryPath, saveCloudVideo, supabase,
+  updateLibraryPdf, uploadCloudPdf,
+} from './lib/supabase';
 import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
+import { pdfTitle, sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
-import type { PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
+import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
 import './styles.css';
 import './readability.css';
 
@@ -31,6 +38,15 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   // Let the browser decode large data URLs natively rather than duplicating a 100 MB PDF in JS strings.
   const response = await fetch(dataUrl);
   return response.blob();
+}
+
+function downloadFromUrl(url: string, name: string) {
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 function subjectClass(subject: Subject): string {
@@ -76,7 +92,18 @@ export default function App() {
   const [notesVersion, setNotesRevision] = useState(0);
   const [libraryFilter, setLibraryFilter] = useState<'all' | Subject>('all');
 
+  const [libraryPdfs, setLibraryPdfs] = useState<LibraryPdf[]>([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryError, setLibraryError] = useState('');
+  const [libraryStatus, setLibraryStatus] = useState('');
+  const [openLibraryPdf, setOpenLibraryPdf] = useState<LibraryPdf | null>(null);
+  const [libraryUrl, setLibraryUrl] = useState('');
+  const [libraryUrlLoading, setLibraryUrlLoading] = useState(false);
+  const [libraryLoadedFor, setLibraryLoadedFor] = useState<string | null>(null);
+
   const playerControlsRef = useRef<PlayerControls | null>(null);
+  const libraryMigratedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timestampsRef = useRef<HTMLDetailsElement>(null);
   const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
@@ -175,6 +202,63 @@ export default function App() {
     return () => { cancelled = true; };
   }, [authReady, authUser?.id]);
 
+  // Load the account-backed PDF library. Guest uploads (session-only) are kept alongside it.
+  useEffect(() => {
+    libraryMigratedRef.current = false;
+    if (!cloudConfigured || !authReady || !authUser) {
+      setLibraryPdfs((current) => current.filter((item) => item.sessionOnly));
+      setLibraryLoading(false);
+      setLibraryLoadedFor(null);
+      return;
+    }
+    const userId = authUser.id;
+    let cancelled = false;
+    setLibraryLoading(true);
+    (async () => {
+      try {
+        const remote = await fetchLibraryPdfs(userId);
+        if (cancelled) return;
+        setLibraryPdfs((current) => sortLibrary([...remote, ...current.filter((item) => item.sessionOnly)]));
+        setLibraryError('');
+      } catch (error) {
+        if (cancelled) return;
+        setLibraryError(error instanceof Error ? error.message : 'Could not load your PDF library.');
+      } finally {
+        if (!cancelled) {
+          setLibraryLoading(false);
+          // Signals the migration effect below that the account list is in place.
+          setLibraryLoadedFor(userId);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authReady, authUser?.id]);
+
+  // When a guest signs in, move the PDFs uploaded in that tab into their account so they sync.
+  useEffect(() => {
+    if (!cloudConfigured || !authUser || libraryMigratedRef.current) return;
+    if (libraryLoadedFor !== authUser.id) return;
+    const pending = libraryPdfs.filter((item) => item.sessionOnly && item.file);
+    if (pending.length === 0) return;
+    libraryMigratedRef.current = true;
+    const userId = authUser.id;
+    (async () => {
+      setLibraryStatus(`Saving ${pending.length} PDF${pending.length === 1 ? '' : 's'} to your account…`);
+      for (const item of pending) {
+        try {
+          const created = await createLibraryPdf(userId, item.file as File, item.subject);
+          setLibraryPdfs((current) => sortLibrary([created, ...current.filter((entry) => entry.id !== item.id)]));
+        } catch (error) {
+          setLibraryError(error instanceof Error
+            ? `Could not save “${item.name}” to your account. ${error.message}`
+            : `Could not save “${item.name}” to your account.`);
+        }
+      }
+      setLibraryStatus('');
+      showToast('Your PDFs are saved to your account now.');
+    })();
+  }, [authUser?.id, libraryLoadedFor, libraryPdfs, showToast]);
+
   useEffect(() => {
     if (!supabase || !authUser || syncedUserId !== authUser.id) return;
     const timeout = window.setTimeout(async () => {
@@ -234,6 +318,41 @@ export default function App() {
     }
     return () => { cancelled = true; };
   }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesVersion]);
+
+  // Resolve the URL for the PDF opened from the library (object URL for guests, signed link for accounts).
+  useEffect(() => {
+    const item = openLibraryPdf;
+    if (!item) {
+      setLibraryUrl('');
+      setLibraryUrlLoading(false);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl = '';
+    setLibraryUrl('');
+    if (item.sessionOnly && item.file) {
+      objectUrl = URL.createObjectURL(item.file);
+      setLibraryUrl(objectUrl);
+      setLibraryUrlLoading(false);
+      return () => {
+        cancelled = true;
+        URL.revokeObjectURL(objectUrl);
+      };
+    }
+    if (!item.storagePath || !supabase) {
+      setLibraryUrlLoading(false);
+      return;
+    }
+    setLibraryUrlLoading(true);
+    createPdfSignedUrl(item.storagePath).then((url) => {
+      if (!cancelled) setLibraryUrl(url);
+    }).catch((error: unknown) => {
+      if (!cancelled) setLibraryError(error instanceof Error ? error.message : 'Could not open this PDF.');
+    }).finally(() => {
+      if (!cancelled) setLibraryUrlLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [openLibraryPdf]);
 
   useEffect(() => {
     if (!toast) return;
@@ -377,29 +496,138 @@ export default function App() {
 
   async function downloadPdf(pdf: PdfPreview) {
     if (!pdf.cloud) {
-      const anchor = document.createElement('a');
-      anchor.href = pdf.url;
-      anchor.download = pdf.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
+      downloadFromUrl(pdf.url, pdf.name);
       return;
     }
     try {
       const response = await fetch(pdf.url);
       if (!response.ok) throw new Error('The download link expired.');
       const objectUrl = URL.createObjectURL(await response.blob());
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = pdf.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
+      downloadFromUrl(objectUrl, pdf.name);
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
     } catch {
       // If the browser blocks a cross-origin download, let the PDF viewer open its signed URL.
       window.open(pdf.url, '_blank', 'noopener,noreferrer');
     }
+  }
+
+  /* ---------------------------- PDF library ---------------------------- */
+
+  async function handleLibraryUpload(file: File, subject: Subject) {
+    const problem = validateLibraryFile(file);
+    if (problem) {
+      setLibraryError(problem);
+      return;
+    }
+    setLibraryError('');
+    if (authUser && supabase && cloudConfigured) {
+      setLibraryBusy(true);
+      setLibraryStatus(`Uploading “${file.name}”…`);
+      try {
+        const created = await createLibraryPdf(authUser.id, file, subject);
+        setLibraryPdfs((current) => sortLibrary([created, ...current]));
+        setLibraryStatus('Saved to your private library.');
+        showToast('PDF added to your library.');
+      } catch (error) {
+        setLibraryStatus('');
+        setLibraryError(error instanceof Error ? error.message : 'The upload failed. Please try again.');
+      } finally {
+        setLibraryBusy(false);
+        window.setTimeout(() => setLibraryStatus((value) => (value === 'Saved to your private library.' ? '' : value)), 3500);
+      }
+      return;
+    }
+    // Guest: keep the file in this tab so nothing is lost mid-session; sign-in moves it to the cloud.
+    setLibraryPdfs((current) => sortLibrary([sessionLibraryItem(file, subject), ...current]));
+    setLibraryStatus('Saved for this tab. Sign in to keep it across devices.');
+    showToast('PDF added — sign in to keep it across devices.');
+    window.setTimeout(() => setLibraryStatus(''), 6000);
+  }
+
+  async function downloadLibraryItem(item: LibraryPdf) {
+    try {
+      if (item.sessionOnly && item.file) {
+        const objectUrl = URL.createObjectURL(item.file);
+        downloadFromUrl(objectUrl, item.name);
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+        return;
+      }
+      const signedUrl = await createPdfSignedUrl(item.storagePath);
+      const response = await fetch(signedUrl);
+      if (!response.ok) throw new Error('The download link expired.');
+      const objectUrl = URL.createObjectURL(await response.blob());
+      downloadFromUrl(objectUrl, item.name);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+    } catch {
+      try {
+        window.open(await createPdfSignedUrl(item.storagePath), '_blank', 'noopener,noreferrer');
+      } catch {
+        setLibraryError('This PDF could not be downloaded right now.');
+      }
+    }
+  }
+
+  async function deleteLibraryItem(item: LibraryPdf) {
+    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” from your PDF library? This cannot be undone.`);
+    if (!confirmed) return;
+    setLibraryError('');
+    if (!item.sessionOnly && authUser && supabase) {
+      setLibraryBusy(true);
+      try {
+        await deleteLibraryPdf(authUser.id, item);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error ? error.message : 'Could not delete this PDF.');
+        return;
+      }
+      setLibraryBusy(false);
+      // Any lesson still pointing at this PDF keeps its timestamps — only the notes link clears.
+      setVideos((current) => current.map((video) => (
+        video.pdfPath && video.pdfPath === item.storagePath
+          ? { ...video, pdfPath: undefined, pdfName: undefined, pdfSize: undefined }
+          : video
+      )));
+    }
+    setLibraryPdfs((current) => current.filter((entry) => entry.id !== item.id));
+    if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
+    showToast('PDF deleted from your library.');
+  }
+
+  async function renameLibraryItem(item: LibraryPdf, name: string, subject: Subject) {
+    const nextName = name.toLowerCase().endsWith('.pdf') ? name : `${name}.pdf`;
+    const updated: LibraryPdf = { ...item, name: nextName, subject, updatedAt: Date.now() };
+    setLibraryPdfs((current) => sortLibrary(current.map((entry) => (entry.id === item.id ? updated : entry))));
+    setOpenLibraryPdf((current) => (current && current.id === item.id ? updated : current));
+    if (item.sessionOnly || !authUser || !supabase) return;
+    setLibraryError('');
+    try {
+      await updateLibraryPdf(authUser.id, item.id, { name: nextName, subject });
+      setVideos((current) => current.map((video) => (
+        video.pdfPath && video.pdfPath === item.storagePath ? { ...video, pdfName: nextName } : video
+      )));
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : 'Could not rename this PDF.');
+    }
+  }
+
+  function attachLibraryPdf(item: LibraryPdf) {
+    if (item.sessionOnly) {
+      setLibraryError('Sign in to attach library PDFs to a lesson.');
+      return;
+    }
+    if (!activeVideoId) {
+      setLibraryError('Load a lesson first, then attach a PDF to it.');
+      return;
+    }
+    setLibraryError('');
+    // A lesson-level PDF would shadow the library copy, so clear it before linking.
+    delete notesSessionRef.current[activeVideoId];
+    updateVideo(activeVideoId, { pdfPath: item.storagePath, pdfName: item.name, pdfSize: item.size });
+    setNotesRevision((value) => value + 1);
+    setPdfError('');
+    setPdfStatus('');
+    setPanelView('notes');
+    showToast('PDF attached to this lesson.');
   }
 
   async function handleSignOut() {
@@ -408,6 +636,7 @@ export default function App() {
     setAuthUser(null);
     setSyncedUserId(null);
     setSyncStatus('local');
+    setOpenLibraryPdf(null);
     showToast('Signed out. Your local browser copy is still here.');
   }
 
@@ -448,7 +677,9 @@ export default function App() {
       if (authUser && supabase && cloudConfigured) {
         setPdfStatus('Saving notes to your private cloud library…');
         try {
-          const path = await uploadCloudPdf(authUser.id, activeVideoId, file, record?.pdfPath);
+          // A PDF linked from the library is never deleted when a lesson replaces its notes.
+          const previousPath = isLibraryPath(record?.pdfPath) ? undefined : record?.pdfPath;
+          const path = await uploadCloudPdf(authUser.id, activeVideoId, file, previousPath);
           updateVideo(activeVideoId, { pdfPath: path, pdfName: file.name, pdfSize: file.size });
           setPdfStatus('Saved to your private cloud library.');
           showToast('PDF notes synced to your account.');
@@ -468,7 +699,8 @@ export default function App() {
 
   async function deletePdf() {
     if (!activeVideoId) return;
-    if (activeRecord?.pdfPath && authUser && supabase) {
+    // A library PDF is only unlinked here; the file itself stays in the PDF library.
+    if (activeRecord?.pdfPath && authUser && supabase && !isLibraryPath(activeRecord.pdfPath)) {
       try {
         await deleteCloudPdf(activeRecord.pdfPath);
       } catch (error) {
@@ -696,6 +928,25 @@ export default function App() {
             </section>
           )}
 
+          <PdfLibraryPanel
+            items={libraryPdfs}
+            loading={libraryLoading}
+            busy={libraryBusy}
+            error={libraryError}
+            status={libraryStatus}
+            signedIn={Boolean(authUser)}
+            cloudConfigured={cloudConfigured}
+            canAttach={Boolean(activeVideoId)}
+            attachedPath={activeRecord?.pdfPath}
+            onUpload={(file, subject) => handleLibraryUpload(file, subject)}
+            onOpen={(item) => setOpenLibraryPdf(item)}
+            onDownload={(item) => void downloadLibraryItem(item)}
+            onDelete={(item) => void deleteLibraryItem(item)}
+            onRename={(item, name, subject) => void renameLibraryItem(item, name, subject)}
+            onAttach={attachLibraryPdf}
+            onSignIn={() => setAuthOpen(true)}
+          />
+
           {libraryVideos.length > 0 && (
             <section className="library-section">
               <div className="library-heading">
@@ -725,6 +976,19 @@ export default function App() {
       <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
       {toast && <div className="toast-message"><span><Check size={14} /></span>{toast}</div>}
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+      {openLibraryPdf && (
+        <PdfLibraryViewer
+          item={openLibraryPdf}
+          url={libraryUrl}
+          loading={libraryUrlLoading}
+          busy={libraryBusy}
+          error={libraryError}
+          status={libraryStatus}
+          onClose={() => setOpenLibraryPdf(null)}
+          onDownload={() => void downloadLibraryItem(openLibraryPdf)}
+          onDelete={() => void deleteLibraryItem(openLibraryPdf)}
+        />
+      )}
     </div>
   );
 }
