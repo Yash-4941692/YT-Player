@@ -376,6 +376,20 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 .library-resume-button { width: 100%; min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 11px; padding: 0 10px; color: #cfc0ff; border: 1px solid rgba(187,161,255,.12); border-radius: 7px; background: rgba(187,161,255,.045); font-size: 10px; font-weight: 700; }
 .library-resume-button:hover { background: rgba(187,161,255,.1); }
 .library-empty { grid-column: 1/-1; padding: 28px; color: #9794a2; border: 1px dashed rgba(255,255,255,.1); border-radius: 12px; font-size: 12px; text-align: center; }
+/* Removed (archived) lessons: Restore + Delete forever instead of Remove. */
+.library-filters .library-filter-removed { color: #b6b2c2; }
+.library-filters .library-filter-removed.selected { color: #ffcfae; border-color: rgba(255,178,140,.2); background: rgba(255,178,140,.07); }
+.library-removed-note { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; padding: 9px 12px; color: #b3b0bd; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; background: rgba(255,255,255,.025); font-size: 11px; line-height: 1.55; }
+.library-removed-note svg { flex: 0 0 auto; color: #ffb18c; }
+.library-card-removed { opacity: .92; }
+.library-card-removed .library-thumb img { filter: grayscale(.55); }
+.library-card-removed:hover .library-thumb img { transform: none; filter: grayscale(.3); }
+.library-removed-actions { display: flex; align-items: center; gap: 6px; margin-top: 11px; }
+.library-removed-actions button { flex: 1; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; border-radius: 7px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.library-restore-button { color: #bff0dc; border: 1px solid rgba(131,228,192,.16); background: rgba(131,228,192,.05); }
+.library-restore-button:hover { background: rgba(131,228,192,.12); }
+.library-delete-forever { color: #ffb8a6; border: 1px solid rgba(255,145,120,.16); background: rgba(255,145,120,.05); }
+.library-delete-forever:hover { background: rgba(255,145,120,.13); }
 
 /* ---------- PDF library (cross-device personal PDF shelf) ---------- */
 .pdf-library-section { margin-top: 42px; padding-top: 26px; border-top: 1px solid var(--line-soft); }
@@ -632,4 +646,104 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* ---------- Error boundary ---------- */
+.error-screen { min-height: 100vh; display: grid; place-items: center; padding: 26px 18px; background: radial-gradient(ellipse 60% 45% at 50% 0%, rgba(255,145,120,.08), transparent 70%), #08090f; }
+.error-screen-card { width: min(560px, 100%); padding: 30px 28px; border-radius: 16px; text-align: center; }
+.error-screen-mark { width: 46px; height: 46px; display: grid; place-items: center; margin: 0 auto 14px; color: #ffb8a6; border: 1px solid rgba(255,145,120,.24); border-radius: 13px; background: rgba(255,145,120,.09); font: 700 22px var(--display); }
+.error-screen-card h1 { margin: 6px 0 10px; font-family: var(--display); font-size: 25px; letter-spacing: -.03em; }
+.error-screen-copy { max-width: 420px; margin: 0 auto 20px; color: #a9a6b3; font-size: 13px; line-height: 1.7; }
+.error-screen-actions { display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap; }
+.error-screen-details { margin-top: 20px; text-align: left; }
+.error-screen-details summary { display: inline-flex; align-items: center; gap: 6px; color: #8f8d9a; font-size: 11px; cursor: pointer; }
+.error-screen-details pre { margin: 9px 0 0; padding: 11px 12px; overflow: auto; max-height: 160px; color: #cfcbd8; border: 1px solid var(--line); border-radius: 9px; background: rgba(5,5,10,.55); font: 11px var(--mono); white-space: pre-wrap; }
+.error-screen-hint { margin: 18px 0 0; color: #7c7a88; font-size: 11px; line-height: 1.65; }
+
+/* ---------- PDF annotation editor (library reader only — opt-in via props) ---------- */
+.pdf-annotate-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(20,18,32,.72); }
+.pdf-annotate-tools, .pdf-annotate-colors, .pdf-annotate-actions { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid rgba(255,255,255,.075); border-radius: 10px; background: rgba(255,255,255,.03); }
+.pdf-annotate-tool, .pdf-annotate-action { width: 32px; height: 32px; display: grid; place-items: center; color: #cbc8d6; border: 0; border-radius: 8px; background: transparent; }
+.pdf-annotate-tool:hover, .pdf-annotate-action:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.09); }
+.pdf-annotate-tool.is-active { color: #0f1116; background: linear-gradient(140deg, #cdbaff, #a98cff); }
+.pdf-annotate-action:disabled { opacity: .3; cursor: not-allowed !important; }
+.pdf-annotate-action.is-danger:hover { color: #ffb2a1; background: rgba(255,145,120,.12); }
+.pdf-annotate-color { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.35); border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,.14); }
+.pdf-annotate-color.is-active { box-shadow: 0 0 0 2px rgba(255,255,255,.85); }
+.pdf-annotate-save { display: flex; align-items: center; gap: 9px; margin-left: auto; }
+.pdf-annotate-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; }
+.pdf-annotate-status.is-dirty { color: #ffcfae; }
+.pdf-annotate-status.is-saved { color: #8fbfa9; }
+.pdf-annotate-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.pdf-annotate-save-button { min-height: 33px; padding: 0 14px; font-size: 11px; }
+.pdf-annotate-save-button:disabled { opacity: .45; cursor: not-allowed !important; }
+.pdf-annotate-hint { flex: 1 0 100%; margin: 2px 0 0; color: #8b8896; font-size: 10px; line-height: 1.5; }
+
+/* The invisible pdf.js text layer: selectable text drawn exactly over the page. */
+.pdf-text-layer { position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; caret-color: CanvasText; z-index: 2; }
+.pdf-text-layer span, .pdf-text-layer br { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.pdf-text-layer ::selection { background: rgba(156,124,255,.42); }
+.pdf-viewer.is-annotating .pdf-page { user-select: text; }
+
+/* Annotation shapes are drawn on their own SVG layer above the canvas. */
+.pdf-annotation-layer { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; }
+.pdf-note-catcher { position: absolute; inset: 0; z-index: 4; cursor: copy; }
+.pdf-note-anchor { position: absolute; z-index: 5; transform: translate(-50%, -50%); }
+.pdf-note-marker { width: 24px; height: 24px; padding: 0; border: 2px solid rgba(12,12,18,.75); border-radius: 50% 50% 50% 4px; box-shadow: 0 3px 10px rgba(0,0,0,.4); }
+.pdf-note-marker.is-editing { outline: 2px solid rgba(255,255,255,.85); }
+.pdf-note-editor { position: absolute; left: 14px; top: 14px; width: min(260px, 62vw); padding: 9px; border: 1px solid rgba(255,255,255,.12); border-radius: 11px; background: #141521; box-shadow: 0 14px 34px rgba(0,0,0,.5); }
+.pdf-note-editor textarea { width: 100%; min-height: 74px; padding: 8px; color: #eae7f2; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; background: rgba(5,5,10,.5); font-size: 12px; line-height: 1.5; resize: vertical; outline: none; }
+.pdf-note-editor textarea:focus { border-color: rgba(187,161,255,.45); }
+.pdf-note-editor-actions { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.pdf-note-save { flex: 1; min-height: 30px; color: #0f1116; border: 0; border-radius: 7px; background: linear-gradient(140deg, #cdbaff, #a98cff); font-size: 11px; font-weight: 700; }
+.pdf-note-remove, .pdf-note-close { width: 30px; height: 30px; display: grid; place-items: center; color: #b9b6c4; border: 1px solid rgba(255,255,255,.09); border-radius: 7px; background: rgba(255,255,255,.03); }
+.pdf-note-remove:hover { color: #ffb2a1; background: rgba(255,145,120,.12); }
+
+@media (max-width: 720px) {
+  .pdf-annotate-bar { padding: 7px 9px; gap: 6px; }
+  .pdf-annotate-tool, .pdf-annotate-action { width: 34px; height: 34px; }
+  .pdf-annotate-hint { display: none; }
+  .pdf-annotate-save { width: 100%; margin-left: 0; justify-content: space-between; }
+  .pdf-note-marker { width: 26px; height: 26px; }
+}
+
+/* ---------- PDF library: storage meter, recently opened, recently deleted ---------- */
+.pdf-library-heading-end { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.pdf-storage-meter { display: flex; align-items: center; gap: 8px; color: #8f8d9a; font-size: 10px; white-space: nowrap; }
+.pdf-storage-bar { width: 92px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.09); overflow: hidden; }
+.pdf-storage-bar-fill { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #83e4c0, #bba1ff); }
+.pdf-recent-strip { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 9px 12px; border: 1px solid rgba(255,255,255,.06); border-radius: 11px; background: rgba(255,255,255,.022); overflow: hidden; }
+.pdf-recent-label { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; color: #9b98a7; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.pdf-recent-items { display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.pdf-recent-items::-webkit-scrollbar { display: none; }
+.pdf-recent-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 0 10px; overflow: hidden; color: #cfcbd9; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; background: rgba(255,255,255,.03); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-recent-chip:hover { color: #fff; background: rgba(187,161,255,.1); }
+.pdf-recent-chip svg { flex: 0 0 auto; color: #bba1ff; }
+.pdf-recent-chip span { color: #8f8d9a; font: 10px var(--mono); }
+.pdf-library-sort { display: inline-flex; align-items: center; gap: 6px; min-height: 33px; padding: 0 11px; color: #8f8d9a; border: 1px solid transparent; border-radius: 8px; background: rgba(255,255,255,.025); font-size: 11px; white-space: nowrap; }
+.pdf-library-sort:hover { color: #dddbe6; background: rgba(255,255,255,.06); }
+.pdf-library-sort.selected { color: #d5c7ff; border-color: rgba(187,161,255,.16); background: rgba(187,161,255,.08); }
+.pdf-library-sort span { color: #aaa0c8; font: 10px var(--mono); }
+.pdf-library-trash-toggle.selected { color: #ffcfae; border-color: rgba(255,178,140,.2); background: rgba(255,178,140,.07); }
+.pdf-trash-note { display: flex; align-items: center; gap: 7px; margin: 0 0 12px; padding: 9px 12px; color: #b3b0bd; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; background: rgba(255,255,255,.025); font-size: 11px; line-height: 1.55; }
+.pdf-trash-note svg { flex: 0 0 auto; color: #ffb18c; }
+.pdf-library-card.is-deleted { opacity: .9; border-style: dashed; }
+.pdf-library-open.is-static { cursor: default; }
+.pdf-library-trash-meta { margin: 0 0 10px; color: #8f8d9a; font-size: 10px; }
+.pdf-library-trash-actions { display: flex; align-items: center; gap: 6px; width: 100%; }
+.pdf-library-restore, .pdf-library-delete-forever { flex: 1; min-height: 30px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.pdf-library-restore { color: #bff0dc; border: 1px solid rgba(131,228,192,.16); background: rgba(131,228,192,.05); }
+.pdf-library-restore:hover { background: rgba(131,228,192,.12); }
+.pdf-library-delete-forever { color: #ffb8a6; border: 1px solid rgba(255,145,120,.16); background: rgba(255,145,120,.05); }
+.pdf-library-delete-forever:hover { background: rgba(255,145,120,.13); }
+.pdf-library-opened { margin-left: 5px; color: #7f7d8b; font-style: normal; }
+.pdf-library-modal-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,.055); color: #8f8d9a; font-size: 10px; }
+.pdf-library-modal-foot svg { color: #bba1ff; }
+.pdf-library-modal-foot-note { color: #a8e7c9; }
+
+@media (max-width: 720px) {
+  .pdf-library-heading-end { align-items: flex-start; }
+  .pdf-recent-strip { flex-direction: column; align-items: flex-start; gap: 7px; }
+  .pdf-storage-bar { width: 70px; }
+  .pdf-library-card.is-deleted .pdf-library-restore, .pdf-library-card.is-deleted .pdf-library-delete-forever { font-size: 9px; }
 }

@@ -1,8 +1,12 @@
 -- Focusframe JEE study player: run this once in Supabase SQL Editor.
--- Legacy columns (kept so existing projects keep working): is_revision and bookmarks are no
--- longer written by the app, and the study_state table is unused. They can be dropped later.
--- The app reads/writes watch_items (lessons, progress, chapters, PDF pointers), pdf_library
--- (the personal, cross-device PDF shelf) and the private video-notes bucket.
+-- Legacy columns (kept on purpose for projects created before this version):
+-- watch_items.is_revision and watch_items.bookmarks are no longer read or written by the
+-- app. The app reads/writes watch_items (lessons, progress, chapters, PDF pointers),
+-- pdf_library (the personal, cross-device PDF shelf), pdf_annotations (annotations drawn
+-- on library PDFs) and the private video-notes bucket.
+-- Existing projects that want those unused columns gone can opt in by running
+-- supabase/migrations/004_optional_drop_legacy.sql — that file is never run automatically
+-- and is not needed for the app to work.
 -- Never put a Supabase service_role key in the browser or in Vercel's VITE_* variables.
 
 create table if not exists public.watch_items (
@@ -46,27 +50,9 @@ drop policy if exists "Users delete their own watch items" on public.watch_items
 create policy "Users delete their own watch items" on public.watch_items
   for delete to authenticated using (auth.uid() = user_id);
 
-create table if not exists public.study_state (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
-);
-
-alter table public.study_state enable row level security;
-grant select, insert, update, delete on public.study_state to authenticated;
-
-drop policy if exists "Users read their own study state" on public.study_state;
-create policy "Users read their own study state" on public.study_state
-  for select to authenticated using (auth.uid() = user_id);
-
-drop policy if exists "Users insert their own study state" on public.study_state;
-create policy "Users insert their own study state" on public.study_state
-  for insert to authenticated with check (auth.uid() = user_id);
-
-drop policy if exists "Users update their own study state" on public.study_state;
-create policy "Users update their own study state" on public.study_state
-  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
-
+-- The whole study_state table (and the is_revision / bookmarks columns above) is unused by
+-- the app. New projects do not create it at all; older projects can drop it with the
+-- optional migration supabase/migrations/004_optional_drop_legacy.sql.
 -- PDF library: PDFs that belong to the account rather than to one lesson.
 -- Files are stored in the same private `video-notes` bucket under `<user id>/library/`.
 create table if not exists public.pdf_library (
@@ -100,6 +86,99 @@ create policy "Users update their own library PDFs" on public.pdf_library
 
 drop policy if exists "Users delete their own library PDFs" on public.pdf_library;
 create policy "Users delete their own library PDFs" on public.pdf_library
+  for delete to authenticated using (auth.uid() = user_id);
+
+-- Annotations drawn on library PDFs (highlight, pen, shapes, sticky notes).
+-- One row per PDF; the drawing data lives in the `data` jsonb column.
+create table if not exists public.pdf_annotations (
+  pdf_id uuid primary key references public.pdf_library(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  data jsonb not null default '{"version":1,"annotations":[]}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists pdf_annotations_user_idx
+  on public.pdf_annotations (user_id, updated_at desc);
+
+alter table public.pdf_annotations enable row level security;
+grant select, insert, update, delete on public.pdf_annotations to authenticated;
+
+drop policy if exists "Users read their own PDF annotations" on public.pdf_annotations;
+create policy "Users read their own PDF annotations" on public.pdf_annotations
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "Users add their own PDF annotations" on public.pdf_annotations;
+create policy "Users add their own PDF annotations" on public.pdf_annotations
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "Users update their own PDF annotations" on public.pdf_annotations;
+create policy "Users update their own PDF annotations" on public.pdf_annotations
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users delete their own PDF annotations" on public.pdf_annotations;
+create policy "Users delete their own PDF annotations" on public.pdf_annotations
+  for delete to authenticated using (auth.uid() = user_id);
+
+-- "Recently deleted" PDFs. The pdf_library row and the stored file are kept; a row here
+-- just means "hidden from the library until restored or deleted forever".
+create table if not exists public.pdf_trash (
+  pdf_id uuid primary key references public.pdf_library(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  deleted_at timestamptz not null default now()
+);
+
+create index if not exists pdf_trash_user_idx
+  on public.pdf_trash (user_id, deleted_at desc);
+
+alter table public.pdf_trash enable row level security;
+grant select, insert, update, delete on public.pdf_trash to authenticated;
+
+drop policy if exists "Users read their own deleted PDFs" on public.pdf_trash;
+create policy "Users read their own deleted PDFs" on public.pdf_trash
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "Users add their own deleted PDFs" on public.pdf_trash;
+create policy "Users add their own deleted PDFs" on public.pdf_trash
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "Users update their own deleted PDFs" on public.pdf_trash;
+create policy "Users update their own deleted PDFs" on public.pdf_trash
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users delete their own deleted PDFs" on public.pdf_trash;
+create policy "Users delete their own deleted PDFs" on public.pdf_trash
+  for delete to authenticated using (auth.uid() = user_id);
+
+-- Per-PDF activity: last opened time and page count. Informational only.
+create table if not exists public.pdf_activity (
+  pdf_id uuid primary key references public.pdf_library(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  last_opened_at timestamptz,
+  page_count integer,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists pdf_activity_user_opened_idx
+  on public.pdf_activity (user_id, last_opened_at desc);
+
+alter table public.pdf_activity enable row level security;
+grant select, insert, update, delete on public.pdf_activity to authenticated;
+
+drop policy if exists "Users read their own PDF activity" on public.pdf_activity;
+create policy "Users read their own PDF activity" on public.pdf_activity
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "Users add their own PDF activity" on public.pdf_activity;
+create policy "Users add their own PDF activity" on public.pdf_activity
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "Users update their own PDF activity" on public.pdf_activity;
+create policy "Users update their own PDF activity" on public.pdf_activity
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users delete their own PDF activity" on public.pdf_activity;
+create policy "Users delete their own PDF activity" on public.pdf_activity
   for delete to authenticated using (auth.uid() = user_id);
 
 -- Private bucket for per-video notes. The app enforces a 100 MB client-side cap;

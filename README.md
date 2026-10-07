@@ -22,7 +22,15 @@ The app now has a **Continue with Google** button. A new user is created automat
 2. Open the project's **SQL Editor → New query**.
 3. Open [`supabase/schema.sql`](./supabase/schema.sql), copy the whole file into the query, and press **Run**. It creates the private watch/study tables, the PDF library table, access policies, and the private PDF bucket.
 
-   **Already set up an earlier version?** Run [`supabase/migrations/002_pdf_library.sql`](./supabase/migrations/002_pdf_library.sql) once instead — it only adds the new `pdf_library` table and its policies, and leaves every existing lesson, timestamp and PDF untouched. (Re-running the full `schema.sql` is also safe; it is written to be repeatable.)
+   **Already set up an earlier version?** Run the migration files in [`supabase/migrations`](./supabase/migrations) in this order — each one only *adds* something and leaves every existing lesson, timestamp, PDF and annotation untouched:
+
+   1. [`002_pdf_library.sql`](./supabase/migrations/002_pdf_library.sql) — the PDF library shelf.
+   2. [`003_pdf_annotations.sql`](./supabase/migrations/003_pdf_annotations.sql) — annotations drawn on library PDFs.
+   3. [`005_pdf_activity_and_trash.sql`](./supabase/migrations/005_pdf_activity_and_trash.sql) — "Recently deleted" PDFs and per-PDF activity (last opened, page count).
+
+   [`004_optional_drop_legacy.sql`](./supabase/migrations/004_optional_drop_legacy.sql) is **optional**: it is never run automatically and only removes old, unused leftovers from very early versions.
+
+   (Re-running the full `schema.sql` is also safe; it is written to be repeatable.)
 
 ### 2. Create Google OAuth credentials (one time for this website)
 
@@ -67,6 +75,24 @@ Open your deployed Focusframe site, click **Sync across devices → Continue wit
 - **Attach** (the link icon, shown while a lesson is open) links a library PDF to that lesson so it opens beside the video. Detaching a PDF from a lesson never deletes it from the library.
 - Files are stored in the existing private `video-notes` bucket under `<user id>/library/…`, so no second bucket is needed.
 - Guests can upload and read PDFs for the current tab only; signing in automatically moves them to the account.
+
+### Reading and annotating a PDF
+
+Open any PDF from the library to get the full-screen reader with an annotation bar:
+
+- **Highlight** — select text with your finger or mouse and the highlight follows the words. If a PDF has no selectable text (a scan, for example), drag a box instead.
+- **Pen**, **Rectangle**, **Ellipse** — freehand ink and shapes, with black/red/blue ink and yellow/green/pink/blue highlights.
+- **Note** — tap anywhere to drop a sticky note, type, then **Save note**.
+- **Eraser** — tap any annotation to delete it. **Clear all** removes everything on that PDF (undo still works until you save).
+- **Undo / redo** — the toolbar buttons, or **Ctrl/Cmd+Z**, **Ctrl/Cmd+Shift+Z** and **Ctrl+Y**.
+- **Save** — annotations are only written when you press **Save**; the bar shows *Unsaved changes* until then, and closing the reader with unsaved work asks first. Annotations are stored normalised (0–1 of each page), so they look the same at every zoom level and on every device.
+- Signed in: annotations sync with the account. Guest: they live in the current tab only, and the reader says so.
+
+### Storage meter, Recently opened and Recently deleted
+
+- The library header shows **"You've used X of 1 GB"**, measured from the sizes already stored in `pdf_library`.
+- **Recently opened** sorts the shelf by the PDF you opened last and shows a strip of the last few; each card also shows its page count once the PDF has been opened.
+- Deleting a PDF now moves it to **Recently deleted** for 30 days with a **Restore** button. **Delete forever** is what actually erases the file from storage — nothing is purged automatically without you pressing it.
 
 The site and guest mode can be hosted without charge within the current Vercel free plan limits. Supabase and Google have their own free-tier/usage limits, which can change. The app accepts PDFs up to 100 MB, but your Supabase project's upload limit may be lower.
 

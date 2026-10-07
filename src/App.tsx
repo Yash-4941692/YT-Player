@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import type { User } from '@supabase/supabase-js';
 import {
-  ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff, FileText, Film,
-  HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
+  Archive, ArchiveRestore, ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff,
+  FileText, Film, HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
@@ -11,8 +11,9 @@ import { PdfLibraryViewer } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
-  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteLibraryPdf,
-  fetchCloudVideos, fetchLibraryPdfs, isLibraryPath, saveCloudVideo, supabase,
+  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteCloudVideo,
+  deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
+  isLibraryPath, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase, trashLibraryPdf,
   updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
 import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
@@ -90,7 +91,7 @@ export default function App() {
   const [pdfPreview, setPdfPreview] = useState<PdfPreview | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [notesVersion, setNotesRevision] = useState(0);
-  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject>('all');
+  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject | 'removed'>('all');
 
   const [libraryPdfs, setLibraryPdfs] = useState<LibraryPdf[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
@@ -101,6 +102,10 @@ export default function App() {
   const [libraryUrl, setLibraryUrl] = useState('');
   const [libraryUrlLoading, setLibraryUrlLoading] = useState(false);
   const [libraryLoadedFor, setLibraryLoadedFor] = useState<string | null>(null);
+  // "Recently deleted" PDFs (pdf id -> when it was deleted) and per-PDF activity.
+  const [pdfTrash, setPdfTrash] = useState<Record<string, number>>({});
+  const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>({});
+  const [trashUnavailable, setTrashUnavailable] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const libraryMigratedRef = useRef(false);
@@ -110,6 +115,11 @@ export default function App() {
   const playlistIdRef = useRef<string | undefined>(undefined);
   const loadTokenRef = useRef(0);
   const lastProgressSaveRef = useRef(-1);
+  // Cloud sync bookkeeping: the updatedAt we last pushed for each lesson, so a progress
+  // tick only re-uploads the one lesson that changed instead of the whole library.
+  const lastSyncedRef = useRef(new Map<string, number>());
+  // Set right after the cloud library loads so the first push after a merge is a full one.
+  const fullReconcileRef = useRef(false);
   const videosRef = useRef(videos);
   videosRef.current = videos;
 
@@ -173,12 +183,17 @@ export default function App() {
     if (!cloudConfigured || !authReady || !authUser) {
       setSyncedUserId(null);
       setSyncStatus('local');
+      lastSyncedRef.current = new Map();
+      fullReconcileRef.current = false;
       return;
     }
     let cancelled = false;
     setSyncedUserId(null);
     setSyncStatus('syncing');
     setSyncMessage('Loading your study library…');
+    // The merge below is the one place that reconciles local and cloud copies.
+    lastSyncedRef.current = new Map();
+    fullReconcileRef.current = true;
     (async () => {
       try {
         const remoteVideos = await fetchCloudVideos(authUser.id);
@@ -259,12 +274,62 @@ export default function App() {
     })();
   }, [authUser?.id, libraryLoadedFor, libraryPdfs, showToast]);
 
+  // Push local changes to the account. Only lessons whose updatedAt differs from the last
+  // successful push are uploaded, plus one full pass right after the cloud list is merged.
+  // "Recently deleted" and activity live in two small optional tables. If the owner has not
+  // run the newest migration yet, the library simply works without those extras.
+  useEffect(() => {
+    if (!cloudConfigured || !authUser || libraryLoadedFor !== authUser.id || !supabase) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [trash, activity] = await Promise.all([
+          fetchPdfTrash(authUser.id),
+          fetchPdfActivity(authUser.id),
+        ]);
+        if (cancelled) return;
+        setPdfTrash(Object.fromEntries(trash.map((entry) => [entry.pdfId, entry.deletedAt])));
+        setPdfActivity(Object.fromEntries(activity.map((entry) => [
+          entry.pdfId,
+          { lastOpenedAt: entry.lastOpenedAt, pageCount: entry.pageCount },
+        ])));
+        setTrashUnavailable(false);
+      } catch {
+        if (!cancelled) setTrashUnavailable(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authUser?.id, libraryLoadedFor]);
+
   useEffect(() => {
     if (!supabase || !authUser || syncedUserId !== authUser.id) return;
+    const fullReconcile = fullReconcileRef.current;
+    if (fullReconcile && videos.length === 0) {
+      fullReconcileRef.current = false;
+      return;
+    }
+    const pending = videos.filter((video) => fullReconcile || lastSyncedRef.current.get(video.videoId) !== video.updatedAt);
+    if (pending.length === 0) return;
+    const userId = authUser.id;
     const timeout = window.setTimeout(async () => {
       setSyncStatus('syncing');
       try {
-        await Promise.all(videos.map((video) => saveCloudVideo(authUser.id, video)));
+        // Writes stay independent: one failing lesson must not block the others.
+        const results = await Promise.allSettled(pending.map(async (video) => {
+          await saveCloudVideo(userId, video);
+          return video;
+        }));
+        const failed: VideoRecord[] = [];
+        results.forEach((result, index) => {
+          const video = pending[index];
+          if (result.status === 'fulfilled') lastSyncedRef.current.set(video.videoId, video.updatedAt);
+          else failed.push(video);
+        });
+        if (failed.length > 0) {
+          const reason = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
+          throw reason?.reason instanceof Error ? reason.reason : new Error(`Could not sync ${failed.length} lesson${failed.length === 1 ? '' : 's'}.`);
+        }
+        fullReconcileRef.current = false;
         setSyncStatus('synced');
         setSyncMessage('Your study library is synced.');
       } catch (error) {
@@ -567,8 +632,57 @@ export default function App() {
     }
   }
 
+  /** Deleting from the library now moves the PDF to "Recently deleted" instead of erasing it. */
   async function deleteLibraryItem(item: LibraryPdf) {
-    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” from your PDF library? This cannot be undone.`);
+    const confirmed = window.confirm(`Move “${pdfTitle(item.name)}” to Recently deleted? You can restore it for the next 30 days.`);
+    if (!confirmed) return;
+    setLibraryError('');
+    const deletedAt = Date.now();
+    if (!item.sessionOnly && authUser && supabase) {
+      setLibraryBusy(true);
+      try {
+        await trashLibraryPdf(authUser.id, item.id);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error
+          ? `Could not move this PDF to Recently deleted. ${error.message}`
+          : 'Could not move this PDF to Recently deleted.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+    setPdfTrash((current) => ({ ...current, [item.id]: deletedAt }));
+    if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
+    showToast('PDF moved to Recently deleted.');
+  }
+
+  /** Bring a PDF back from "Recently deleted". Nothing was removed from storage. */
+  async function restoreTrashedPdf(item: LibraryPdf) {
+    setLibraryError('');
+    if (!item.sessionOnly && authUser && supabase) {
+      setLibraryBusy(true);
+      try {
+        await restoreLibraryPdf(authUser.id, item.id);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error
+          ? `Could not restore this PDF. ${error.message}`
+          : 'Could not restore this PDF.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+    setPdfTrash((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
+    showToast('PDF restored to your library.');
+  }
+
+  /** "Delete forever": removes the file from storage and the row from the library. */
+  async function deleteLibraryItemForever(item: LibraryPdf) {
+    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” forever?\n\nThe PDF file is erased from your storage and this cannot be undone.`);
     if (!confirmed) return;
     setLibraryError('');
     if (!item.sessionOnly && authUser && supabase) {
@@ -577,7 +691,9 @@ export default function App() {
         await deleteLibraryPdf(authUser.id, item);
       } catch (error) {
         setLibraryBusy(false);
-        setLibraryError(error instanceof Error ? error.message : 'Could not delete this PDF.');
+        setLibraryError(error instanceof Error
+          ? `Could not delete this PDF for good. ${error.message}`
+          : 'Could not delete this PDF for good.');
         return;
       }
       setLibraryBusy(false);
@@ -589,8 +705,13 @@ export default function App() {
       )));
     }
     setLibraryPdfs((current) => current.filter((entry) => entry.id !== item.id));
+    setPdfTrash((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
-    showToast('PDF deleted from your library.');
+    showToast('PDF deleted forever.');
   }
 
   async function renameLibraryItem(item: LibraryPdf, name: string, subject: Subject) {
@@ -608,6 +729,28 @@ export default function App() {
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : 'Could not rename this PDF.');
     }
+  }
+
+  /** Remember when a PDF was last opened, so "Recently opened" can be shown in the panel. */
+  function notePdfOpened(item: LibraryPdf) {
+    const openedAt = Date.now();
+    setPdfActivity((current) => ({
+      ...current,
+      [item.id]: { lastOpenedAt: openedAt, pageCount: current[item.id]?.pageCount ?? null },
+    }));
+    if (authUser && !item.sessionOnly) {
+      // Fail soft: an older project without the activity table must not break the reader.
+      void savePdfActivity(authUser.id, item.id, { lastOpenedAt: openedAt }).catch(() => undefined);
+    }
+  }
+
+  /** Called by the reader once a PDF's page count is known. */
+  function handlePdfPageCount(pdfId: string, pageCount: number) {
+    setPdfActivity((current) => ({
+      ...current,
+      [pdfId]: { lastOpenedAt: current[pdfId]?.lastOpenedAt ?? Date.now(), pageCount },
+    }));
+    if (authUser) void savePdfActivity(authUser.id, pdfId, { lastOpenedAt: Date.now(), pageCount }).catch(() => undefined);
   }
 
   function attachLibraryPdf(item: LibraryPdf) {
@@ -717,8 +860,83 @@ export default function App() {
   }
 
   const libraryVideos = videos.filter((video) => !video.archived);
-  const filteredLibrary = libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
+  const removedVideos = videos.filter((video) => video.archived);
+  const showingRemoved = libraryFilter === 'removed';
+  const filteredLibrary = showingRemoved ? [] : libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
   const availableSubjects = subjects.filter((subject) => libraryVideos.some((video) => video.subject === subject));
+  const libraryVisible = libraryVideos.length > 0 || removedVideos.length > 0 || showingRemoved;
+
+  const activeLibraryPdfs = libraryPdfs.filter((item) => !pdfTrash[item.id]);
+  const deletedLibraryPdfs = libraryPdfs
+    .filter((item) => pdfTrash[item.id])
+    .sort((a, b) => (pdfTrash[b.id] ?? 0) - (pdfTrash[a.id] ?? 0));
+  /** Storage meter: the sum of the sizes already stored for each library PDF. */
+  const libraryUsedBytes = activeLibraryPdfs.reduce((total, item) => total + (Number(item.size) || 0), 0);
+
+  /** A PDF is "linked from the library" when it lives under the library prefix or a library row points at it. */
+  function pdfLinkedFromLibrary(path?: string): boolean {
+    if (!path) return false;
+    if (isLibraryPath(path)) return true;
+    return libraryPdfs.some((item) => Boolean(item.storagePath) && item.storagePath === path);
+  }
+
+  function restoreVideo(record: VideoRecord) {
+    updateVideo(record.videoId, { archived: false });
+    if (removedVideos.length <= 1) setLibraryFilter('all');
+    showToast('Lesson restored to your library.');
+  }
+
+  /**
+   * Remove a lesson and its data for good. The lesson PDF is deleted from storage too —
+   * except when that same file is linked from the PDF library, which is never touched.
+   */
+  async function deleteVideoForever(record: VideoRecord) {
+    const keepLibraryPdf = pdfLinkedFromLibrary(record.pdfPath);
+    const removesLessonPdf = Boolean(record.pdfPath) && !keepLibraryPdf;
+    const fileNote = removesLessonPdf
+      ? '\n\nIts saved PDF will also be deleted from your storage.'
+      : keepLibraryPdf
+        ? '\n\nIts PDF is part of your PDF library, so that file is kept.'
+        : '';
+    const confirmed = window.confirm(`Delete “${record.title}” forever?${fileNote}\n\nThis removes the lesson, its progress and its timestamps. This cannot be undone.`);
+    if (!confirmed) return;
+
+    setLibraryError('');
+    if (authUser && supabase) {
+      if (removesLessonPdf) {
+        try {
+          await deleteCloudPdf(record.pdfPath as string);
+        } catch (error) {
+          setLibraryError(error instanceof Error
+            ? `Could not delete the saved PDF, so nothing was removed. ${error.message}`
+            : 'Could not delete the saved PDF, so nothing was removed.');
+          return;
+        }
+      }
+      setLibraryBusy(true);
+      try {
+        await deleteCloudVideo(authUser.id, record.videoId);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error ? error.message : 'Could not delete this lesson from your account.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+
+    delete notesSessionRef.current[record.videoId];
+    setVideos((current) => current.filter((video) => video.videoId !== record.videoId));
+    // Stop the study room when the lesson on screen is the one being deleted, so playback
+    // ticks cannot re-create the record that was just removed.
+    if (activeVideoId === record.videoId) {
+      setSource(null);
+      setActiveVideoId(null);
+      setPdfPreview(null);
+      setNotesRevision((value) => value + 1);
+    }
+    if (removedVideos.length <= 1) setLibraryFilter('all');
+    showToast('Lesson deleted forever.');
+  }
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
@@ -929,7 +1147,12 @@ export default function App() {
           )}
 
           <PdfLibraryPanel
-            items={libraryPdfs}
+            items={activeLibraryPdfs}
+            deletedItems={deletedLibraryPdfs}
+            deletedAt={pdfTrash}
+            activity={pdfActivity}
+            usedBytes={libraryUsedBytes}
+            trashUnavailable={trashUnavailable}
             loading={libraryLoading}
             busy={libraryBusy}
             error={libraryError}
@@ -939,33 +1162,60 @@ export default function App() {
             canAttach={Boolean(activeVideoId)}
             attachedPath={activeRecord?.pdfPath}
             onUpload={(file, subject) => handleLibraryUpload(file, subject)}
-            onOpen={(item) => setOpenLibraryPdf(item)}
+            onOpen={(item) => { notePdfOpened(item); setOpenLibraryPdf(item); }}
             onDownload={(item) => void downloadLibraryItem(item)}
             onDelete={(item) => void deleteLibraryItem(item)}
+            onRestore={(item) => void restoreTrashedPdf(item)}
+            onDeleteForever={(item) => void deleteLibraryItemForever(item)}
             onRename={(item, name, subject) => void renameLibraryItem(item, name, subject)}
             onAttach={attachLibraryPdf}
             onSignIn={() => setAuthOpen(true)}
           />
 
-          {libraryVideos.length > 0 && (
+          {libraryVisible && (
             <section className="library-section">
               <div className="library-heading">
                 <div>
-                  <p className="eyebrow">YOUR LIBRARY</p>
-                  <h2>Pick up where you left off</h2>
-                  <p>Timestamps, notes and progress stay with every lesson.</p>
+                  <p className="eyebrow">{showingRemoved ? 'REMOVED LESSONS' : 'YOUR LIBRARY'}</p>
+                  <h2>{showingRemoved ? 'Removed, not gone' : 'Pick up where you left off'}</h2>
+                  <p>{showingRemoved
+                    ? 'Removed lessons stay out of your library until you restore them or delete them forever.'
+                    : 'Timestamps, notes and progress stay with every lesson.'}</p>
                 </div>
-                <span className="library-count"><span>{libraryVideos.length.toString().padStart(2, '0')}</span> SAVED</span>
+                <span className="library-count"><span>{(showingRemoved ? removedVideos.length : libraryVideos.length).toString().padStart(2, '0')}</span> {showingRemoved ? 'REMOVED' : 'SAVED'}</span>
               </div>
               <div className="library-filters">
                 <button className={libraryFilter === 'all' ? 'selected' : ''} onClick={() => setLibraryFilter('all')}>All lessons <span>{libraryVideos.length}</span></button>
                 {availableSubjects.map((subject) => <button key={subject} className={libraryFilter === subject ? 'selected' : ''} onClick={() => setLibraryFilter(subject)}>{subject} <span>{libraryVideos.filter((video) => video.subject === subject).length}</span></button>)}
+                {removedVideos.length > 0 && (
+                  <button className={`library-filter-removed ${showingRemoved ? 'selected' : ''}`} onClick={() => setLibraryFilter(showingRemoved ? 'all' : 'removed')}>
+                    <Archive size={13} /> Removed <span>{removedVideos.length}</span>
+                  </button>
+                )}
               </div>
+              {showingRemoved && (
+                <p className="library-removed-note">
+                  <Info size={13} /> “Delete forever” also erases that lesson’s saved PDF from storage. A PDF that lives in your PDF library above is never deleted.
+                </p>
+              )}
               <div className="library-grid">
-                {filteredLibrary.map((video) => (
-                  <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
-                ))}
-                {filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
+                {showingRemoved
+                  ? removedVideos.map((video) => (
+                      <LibraryCard
+                        key={video.videoId}
+                        video={video}
+                        removed
+                        active={video.videoId === activeVideoId}
+                        onResume={() => resumeVideo(video)}
+                        onRestore={() => restoreVideo(video)}
+                        onDeleteForever={() => void deleteVideoForever(video)}
+                      />
+                    ))
+                  : filteredLibrary.map((video) => (
+                      <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
+                    ))}
+                {!showingRemoved && filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
+                {showingRemoved && removedVideos.length === 0 && <div className="library-empty">Nothing has been removed.</div>}
               </div>
             </section>
           )}
@@ -984,19 +1234,33 @@ export default function App() {
           busy={libraryBusy}
           error={libraryError}
           status={libraryStatus}
+          signedIn={Boolean(authUser)}
+          userId={authUser?.id ?? null}
           onClose={() => setOpenLibraryPdf(null)}
           onDownload={() => void downloadLibraryItem(openLibraryPdf)}
           onDelete={() => void deleteLibraryItem(openLibraryPdf)}
+          onPageCount={handlePdfPageCount}
         />
       )}
     </div>
   );
 }
 
-function LibraryCard({ video, active, onResume, onRemove }: { video: VideoRecord; active: boolean; onResume: () => void; onRemove: () => void }) {
+interface LibraryCardProps {
+  video: VideoRecord;
+  active: boolean;
+  /** Removed (archived) lessons show Restore + Delete forever instead of Remove. */
+  removed?: boolean;
+  onResume: () => void;
+  onRemove?: () => void;
+  onRestore?: () => void;
+  onDeleteForever?: () => void;
+}
+
+function LibraryCard({ video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever }: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
   return (
-    <article className={`library-card glass-card ${active ? 'library-card-active' : ''}`}>
+    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''}`}>
       <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}>
         <img src={video.thumbnail} alt="" loading="lazy" />
         <span className="library-play"><Play size={14} fill="currentColor" /></span>
@@ -1008,13 +1272,22 @@ function LibraryCard({ video, active, onResume, onRemove }: { video: VideoRecord
           <span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span>
           <span className="library-card-tools">
             {video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
-            <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
+            {!removed && (
+              <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
+            )}
           </span>
         </div>
         <button className="library-video-title" onClick={onResume}>{video.title}</button>
         <p>{video.channel || 'YouTube lesson'}</p>
         <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-        <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+        {removed ? (
+          <div className="library-removed-actions">
+            <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
+            <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
+          </div>
+        ) : (
+          <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+        )}
       </div>
     </article>
   );
