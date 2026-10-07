@@ -67,6 +67,16 @@ interface Props {
   onError: (message: string) => void;
 }
 
+/**
+ * Privacy-enhanced YouTube host. Using www.youtube-nocookie.com means YouTube does not
+ * store viewing cookies until playback starts. Every embed-related URL in this file is
+ * built from this one value.
+ *
+ * ONE-LINE REVERT: if a video that used to play now refuses to play, change the string
+ * below back to 'https://www.youtube.com' and nothing else needs to change.
+ */
+const YOUTUBE_EMBED_HOST = 'https://www.youtube-nocookie.com';
+
 let apiPromise: Promise<void> | null = null;
 
 function loadIframeApi(): Promise<void> {
@@ -74,6 +84,7 @@ function loadIframeApi(): Promise<void> {
   if (apiPromise) return apiPromise;
 
   apiPromise = new Promise<void>((resolve, reject) => {
+    const apiUrl = `${YOUTUBE_EMBED_HOST}/iframe_api`;
     const timeout = window.setTimeout(() => reject(new Error('YouTube player took too long to load. Check your connection and try again.')), 18000);
     const previousReady = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
@@ -81,10 +92,10 @@ function loadIframeApi(): Promise<void> {
       window.clearTimeout(timeout);
       resolve();
     };
-    let script = document.querySelector<HTMLScriptElement>('script[src="https://www.youtube.com/iframe_api"]');
+    let script = document.querySelector<HTMLScriptElement>(`script[src="${apiUrl}"]`);
     if (!script) {
       script = document.createElement('script');
-      script.src = 'https://www.youtube.com/iframe_api';
+      script.src = apiUrl;
       script.async = true;
       script.onerror = () => {
         window.clearTimeout(timeout);
