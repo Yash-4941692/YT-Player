@@ -236,3 +236,121 @@ export async function deleteLibraryPdf(userId: string, item: LibraryPdf): Promis
   const { error } = await supabase.from('pdf_library').delete().eq('id', item.id).eq('user_id', userId);
   if (error) throw error;
 }
+
+/* ---------------------------------------------------------------------------
+ * PDF annotations — drawings, highlights and sticky notes on a library PDF.
+ * One row per PDF (`pdf_annotations`), read and written next to the library
+ * helpers above. Guests keep annotations in memory for the current tab only.
+ * ------------------------------------------------------------------------- */
+
+export interface PdfAnnotationRecord {
+  annotations: unknown;
+  updatedAt: number;
+}
+
+/** Read the saved annotation document for one library PDF, or null when there is none yet. */
+export async function fetchPdfAnnotations(userId: string, pdfId: string): Promise<PdfAnnotationRecord | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('pdf_annotations')
+    .select('data, updated_at')
+    .eq('pdf_id', pdfId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const row = data as { data: unknown; updated_at: string | null };
+  return {
+    annotations: row.data,
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+  };
+}
+
+/** Upsert the annotation document for one library PDF. */
+export async function savePdfAnnotations(userId: string, pdfId: string, data: unknown): Promise<number> {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from('pdf_annotations')
+    .upsert(
+      { pdf_id: pdfId, user_id: userId, data, updated_at: updatedAt },
+      { onConflict: 'pdf_id' },
+    );
+  if (error) throw error;
+  return new Date(updatedAt).getTime();
+}
+
+/* ---------------------------------------------------------------------------
+ * Recently deleted PDFs and per-PDF activity (last opened, page count).
+ * Both tables are additive; the PDF files themselves never move.
+ * ------------------------------------------------------------------------- */
+
+export interface PdfTrashEntry {
+  pdfId: string;
+  deletedAt: number;
+}
+
+export interface PdfActivityEntry {
+  pdfId: string;
+  lastOpenedAt: number | null;
+  pageCount: number | null;
+}
+
+export async function fetchPdfTrash(userId: string): Promise<PdfTrashEntry[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('pdf_trash')
+    .select('pdf_id, deleted_at')
+    .eq('user_id', userId);
+  if (error) throw error;
+  return (data as { pdf_id: string; deleted_at: string | null }[]).map((row) => ({
+    pdfId: row.pdf_id,
+    deletedAt: row.deleted_at ? new Date(row.deleted_at).getTime() : Date.now(),
+  }));
+}
+
+/** Move a PDF to "Recently deleted". The library row and the file stay untouched. */
+export async function trashLibraryPdf(userId: string, pdfId: string): Promise<number> {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const deletedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from('pdf_trash')
+    .upsert({ pdf_id: pdfId, user_id: userId, deleted_at: deletedAt }, { onConflict: 'pdf_id' });
+  if (error) throw error;
+  return new Date(deletedAt).getTime();
+}
+
+/** Take a PDF out of "Recently deleted". */
+export async function restoreLibraryPdf(userId: string, pdfId: string): Promise<void> {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const { error } = await supabase.from('pdf_trash').delete().eq('pdf_id', pdfId).eq('user_id', userId);
+  if (error) throw error;
+}
+
+export async function fetchPdfActivity(userId: string): Promise<PdfActivityEntry[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('pdf_activity')
+    .select('pdf_id, last_opened_at, page_count')
+    .eq('user_id', userId);
+  if (error) throw error;
+  return (data as { pdf_id: string; last_opened_at: string | null; page_count: number | null }[]).map((row) => ({
+    pdfId: row.pdf_id,
+    lastOpenedAt: row.last_opened_at ? new Date(row.last_opened_at).getTime() : null,
+    pageCount: row.page_count === null ? null : Number(row.page_count),
+  }));
+}
+
+/** Record that a PDF was opened, and how many pages it has. */
+export async function savePdfActivity(
+  userId: string,
+  pdfId: string,
+  patch: { lastOpenedAt?: number; pageCount?: number },
+): Promise<void> {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const body: Record<string, unknown> = { pdf_id: pdfId, user_id: userId, updated_at: new Date().toISOString() };
+  if (patch.lastOpenedAt) body.last_opened_at = new Date(patch.lastOpenedAt).toISOString();
+  if (patch.pageCount) body.page_count = patch.pageCount;
+  const { error } = await supabase.from('pdf_activity').upsert(body, { onConflict: 'pdf_id' });
+  if (error) throw error;
+}

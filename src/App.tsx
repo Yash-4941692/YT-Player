@@ -12,7 +12,8 @@ import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
   cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteCloudVideo,
-  deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, isLibraryPath, saveCloudVideo, supabase,
+  deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
+  isLibraryPath, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase, trashLibraryPdf,
   updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
 import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
@@ -101,6 +102,10 @@ export default function App() {
   const [libraryUrl, setLibraryUrl] = useState('');
   const [libraryUrlLoading, setLibraryUrlLoading] = useState(false);
   const [libraryLoadedFor, setLibraryLoadedFor] = useState<string | null>(null);
+  // "Recently deleted" PDFs (pdf id -> when it was deleted) and per-PDF activity.
+  const [pdfTrash, setPdfTrash] = useState<Record<string, number>>({});
+  const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>({});
+  const [trashUnavailable, setTrashUnavailable] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const libraryMigratedRef = useRef(false);
@@ -271,6 +276,31 @@ export default function App() {
 
   // Push local changes to the account. Only lessons whose updatedAt differs from the last
   // successful push are uploaded, plus one full pass right after the cloud list is merged.
+  // "Recently deleted" and activity live in two small optional tables. If the owner has not
+  // run the newest migration yet, the library simply works without those extras.
+  useEffect(() => {
+    if (!cloudConfigured || !authUser || libraryLoadedFor !== authUser.id || !supabase) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [trash, activity] = await Promise.all([
+          fetchPdfTrash(authUser.id),
+          fetchPdfActivity(authUser.id),
+        ]);
+        if (cancelled) return;
+        setPdfTrash(Object.fromEntries(trash.map((entry) => [entry.pdfId, entry.deletedAt])));
+        setPdfActivity(Object.fromEntries(activity.map((entry) => [
+          entry.pdfId,
+          { lastOpenedAt: entry.lastOpenedAt, pageCount: entry.pageCount },
+        ])));
+        setTrashUnavailable(false);
+      } catch {
+        if (!cancelled) setTrashUnavailable(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authUser?.id, libraryLoadedFor]);
+
   useEffect(() => {
     if (!supabase || !authUser || syncedUserId !== authUser.id) return;
     const fullReconcile = fullReconcileRef.current;
@@ -602,8 +632,57 @@ export default function App() {
     }
   }
 
+  /** Deleting from the library now moves the PDF to "Recently deleted" instead of erasing it. */
   async function deleteLibraryItem(item: LibraryPdf) {
-    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” from your PDF library? This cannot be undone.`);
+    const confirmed = window.confirm(`Move “${pdfTitle(item.name)}” to Recently deleted? You can restore it for the next 30 days.`);
+    if (!confirmed) return;
+    setLibraryError('');
+    const deletedAt = Date.now();
+    if (!item.sessionOnly && authUser && supabase) {
+      setLibraryBusy(true);
+      try {
+        await trashLibraryPdf(authUser.id, item.id);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error
+          ? `Could not move this PDF to Recently deleted. ${error.message}`
+          : 'Could not move this PDF to Recently deleted.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+    setPdfTrash((current) => ({ ...current, [item.id]: deletedAt }));
+    if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
+    showToast('PDF moved to Recently deleted.');
+  }
+
+  /** Bring a PDF back from "Recently deleted". Nothing was removed from storage. */
+  async function restoreTrashedPdf(item: LibraryPdf) {
+    setLibraryError('');
+    if (!item.sessionOnly && authUser && supabase) {
+      setLibraryBusy(true);
+      try {
+        await restoreLibraryPdf(authUser.id, item.id);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error
+          ? `Could not restore this PDF. ${error.message}`
+          : 'Could not restore this PDF.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+    setPdfTrash((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
+    showToast('PDF restored to your library.');
+  }
+
+  /** "Delete forever": removes the file from storage and the row from the library. */
+  async function deleteLibraryItemForever(item: LibraryPdf) {
+    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” forever?\n\nThe PDF file is erased from your storage and this cannot be undone.`);
     if (!confirmed) return;
     setLibraryError('');
     if (!item.sessionOnly && authUser && supabase) {
@@ -612,7 +691,9 @@ export default function App() {
         await deleteLibraryPdf(authUser.id, item);
       } catch (error) {
         setLibraryBusy(false);
-        setLibraryError(error instanceof Error ? error.message : 'Could not delete this PDF.');
+        setLibraryError(error instanceof Error
+          ? `Could not delete this PDF for good. ${error.message}`
+          : 'Could not delete this PDF for good.');
         return;
       }
       setLibraryBusy(false);
@@ -624,8 +705,13 @@ export default function App() {
       )));
     }
     setLibraryPdfs((current) => current.filter((entry) => entry.id !== item.id));
+    setPdfTrash((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
-    showToast('PDF deleted from your library.');
+    showToast('PDF deleted forever.');
   }
 
   async function renameLibraryItem(item: LibraryPdf, name: string, subject: Subject) {
@@ -643,6 +729,28 @@ export default function App() {
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : 'Could not rename this PDF.');
     }
+  }
+
+  /** Remember when a PDF was last opened, so "Recently opened" can be shown in the panel. */
+  function notePdfOpened(item: LibraryPdf) {
+    const openedAt = Date.now();
+    setPdfActivity((current) => ({
+      ...current,
+      [item.id]: { lastOpenedAt: openedAt, pageCount: current[item.id]?.pageCount ?? null },
+    }));
+    if (authUser && !item.sessionOnly) {
+      // Fail soft: an older project without the activity table must not break the reader.
+      void savePdfActivity(authUser.id, item.id, { lastOpenedAt: openedAt }).catch(() => undefined);
+    }
+  }
+
+  /** Called by the reader once a PDF's page count is known. */
+  function handlePdfPageCount(pdfId: string, pageCount: number) {
+    setPdfActivity((current) => ({
+      ...current,
+      [pdfId]: { lastOpenedAt: current[pdfId]?.lastOpenedAt ?? Date.now(), pageCount },
+    }));
+    if (authUser) void savePdfActivity(authUser.id, pdfId, { lastOpenedAt: Date.now(), pageCount }).catch(() => undefined);
   }
 
   function attachLibraryPdf(item: LibraryPdf) {
@@ -757,6 +865,13 @@ export default function App() {
   const filteredLibrary = showingRemoved ? [] : libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
   const availableSubjects = subjects.filter((subject) => libraryVideos.some((video) => video.subject === subject));
   const libraryVisible = libraryVideos.length > 0 || removedVideos.length > 0 || showingRemoved;
+
+  const activeLibraryPdfs = libraryPdfs.filter((item) => !pdfTrash[item.id]);
+  const deletedLibraryPdfs = libraryPdfs
+    .filter((item) => pdfTrash[item.id])
+    .sort((a, b) => (pdfTrash[b.id] ?? 0) - (pdfTrash[a.id] ?? 0));
+  /** Storage meter: the sum of the sizes already stored for each library PDF. */
+  const libraryUsedBytes = activeLibraryPdfs.reduce((total, item) => total + (Number(item.size) || 0), 0);
 
   /** A PDF is "linked from the library" when it lives under the library prefix or a library row points at it. */
   function pdfLinkedFromLibrary(path?: string): boolean {
@@ -1032,7 +1147,12 @@ export default function App() {
           )}
 
           <PdfLibraryPanel
-            items={libraryPdfs}
+            items={activeLibraryPdfs}
+            deletedItems={deletedLibraryPdfs}
+            deletedAt={pdfTrash}
+            activity={pdfActivity}
+            usedBytes={libraryUsedBytes}
+            trashUnavailable={trashUnavailable}
             loading={libraryLoading}
             busy={libraryBusy}
             error={libraryError}
@@ -1042,9 +1162,11 @@ export default function App() {
             canAttach={Boolean(activeVideoId)}
             attachedPath={activeRecord?.pdfPath}
             onUpload={(file, subject) => handleLibraryUpload(file, subject)}
-            onOpen={(item) => setOpenLibraryPdf(item)}
+            onOpen={(item) => { notePdfOpened(item); setOpenLibraryPdf(item); }}
             onDownload={(item) => void downloadLibraryItem(item)}
             onDelete={(item) => void deleteLibraryItem(item)}
+            onRestore={(item) => void restoreTrashedPdf(item)}
+            onDeleteForever={(item) => void deleteLibraryItemForever(item)}
             onRename={(item, name, subject) => void renameLibraryItem(item, name, subject)}
             onAttach={attachLibraryPdf}
             onSignIn={() => setAuthOpen(true)}
@@ -1112,9 +1234,12 @@ export default function App() {
           busy={libraryBusy}
           error={libraryError}
           status={libraryStatus}
+          signedIn={Boolean(authUser)}
+          userId={authUser?.id ?? null}
           onClose={() => setOpenLibraryPdf(null)}
           onDownload={() => void downloadLibraryItem(openLibraryPdf)}
           onDelete={() => void deleteLibraryItem(openLibraryPdf)}
+          onPageCount={handlePdfPageCount}
         />
       )}
     </div>

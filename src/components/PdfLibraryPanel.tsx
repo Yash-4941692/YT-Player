@@ -1,12 +1,37 @@
 import { useMemo, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import {
-  Check, Cloud, CloudOff, Download, FileText, HardDrive, Link2, Pencil, Search, Trash2, Upload, X,
+  Check, Clock, Cloud, CloudOff, Download, FileText, HardDrive, Link2, Pencil, RotateCcw,
+  Search, Trash2, Upload, X,
 } from 'lucide-react';
-import { pdfTitle, sortLibrary } from '../lib/pdfLibrary';
+import { formatLibraryDate, pdfTitle, sortLibrary } from '../lib/pdfLibrary';
 import { formatBytes } from '../lib/utils';
 import type { LibraryPdf, Subject } from '../types';
 
 const subjects: Subject[] = ['Physics', 'Chemistry', 'Mathematics', 'Other'];
+
+/** How long a deleted PDF waits in "Recently deleted" before the owner can purge it. */
+const TRASH_RETENTION_DAYS = 30;
+/** Supabase's free storage allowance, used only for the "of Y GB" part of the meter. */
+const STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024;
+
+export interface PdfActivity {
+  lastOpenedAt: number | null;
+  pageCount: number | null;
+}
+
+function usedLabel(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (bytes === 0) return '0 MB';
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  if (mb < 1) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
+function daysLeft(deletedAt: number): number {
+  const elapsed = Math.floor((Date.now() - deletedAt) / 86_400_000);
+  return Math.max(0, TRASH_RETENTION_DAYS - elapsed);
+}
 
 function subjectClass(subject: Subject): string {
   return subject.toLowerCase().replace(/\s+/g, '-');
@@ -18,6 +43,11 @@ function formatSize(bytes: number): string {
 
 interface Props {
   items: LibraryPdf[];
+  deletedItems: LibraryPdf[];
+  deletedAt: Record<string, number>;
+  activity: Record<string, PdfActivity>;
+  usedBytes: number;
+  trashUnavailable: boolean;
   loading: boolean;
   busy: boolean;
   error: string;
@@ -30,22 +60,36 @@ interface Props {
   onOpen: (item: LibraryPdf) => void;
   onDownload: (item: LibraryPdf) => void;
   onDelete: (item: LibraryPdf) => void;
+  onRestore: (item: LibraryPdf) => void;
+  onDeleteForever: (item: LibraryPdf) => void;
   onRename: (item: LibraryPdf, name: string, subject: Subject) => void;
   onAttach: (item: LibraryPdf) => void;
   onSignIn: () => void;
 }
 
 export function PdfLibraryPanel({
-  items, loading, busy, error, status, signedIn, cloudConfigured, canAttach, attachedPath,
-  onUpload, onOpen, onDownload, onDelete, onRename, onAttach, onSignIn,
+  items, deletedItems, deletedAt, activity, usedBytes, trashUnavailable, loading, busy, error, status,
+  signedIn, cloudConfigured, canAttach, attachedPath,
+  onUpload, onOpen, onDownload, onDelete, onRestore, onDeleteForever, onRename, onAttach, onSignIn,
 }: Props) {
   const [filter, setFilter] = useState<'all' | Subject>('all');
   const [query, setQuery] = useState('');
   const [uploadSubject, setUploadSubject] = useState<Subject>('Other');
   const [dragging, setDragging] = useState(false);
+  const [showTrash, setShowTrash] = useState(false);
+  const [byRecent, setByRecent] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const ordered = useMemo(() => sortLibrary(items), [items]);
+  // "Recently opened" is a sort of the same shelf, newest first, using the activity table.
+  const ordered = useMemo(() => {
+    const sorted = sortLibrary(items);
+    if (!byRecent) return sorted;
+    return [...sorted].sort((a, b) => (activity[b.id]?.lastOpenedAt ?? 0) - (activity[a.id]?.lastOpenedAt ?? 0));
+  }, [items, byRecent, activity]);
+  const recentlyOpened = useMemo(
+    () => ordered.filter((item) => activity[item.id]?.lastOpenedAt).slice(0, 5),
+    [ordered, activity],
+  );
   const counts = useMemo(() => {
     const map = new Map<Subject, number>();
     for (const item of ordered) map.set(item.subject, (map.get(item.subject) ?? 0) + 1);
@@ -100,7 +144,18 @@ export function PdfLibraryPanel({
                 : 'Guest uploads stay in this tab until cloud sync is switched on.'}
           </p>
         </div>
-        <span className="library-count"><span>{ordered.length.toString().padStart(2, '0')}</span> PDFS</span>
+        <div className="pdf-library-heading-end">
+          <span className="library-count"><span>{ordered.length.toString().padStart(2, '0')}</span> PDFS</span>
+          <span className="pdf-storage-meter" title="Total size of the PDFs in your library">
+            <span className="pdf-storage-bar">
+              <span
+                className="pdf-storage-bar-fill"
+                style={{ width: `${Math.min(100, (usedBytes / STORAGE_QUOTA_BYTES) * 100).toFixed(2)}%` }}
+              />
+            </span>
+            You’ve used {usedLabel(usedBytes)} of {Math.round(STORAGE_QUOTA_BYTES / (1024 * 1024 * 1024))} GB
+          </span>
+        </div>
       </div>
 
       {!signedIn && cloudConfigured && (
@@ -108,6 +163,20 @@ export function PdfLibraryPanel({
           <span className="pdf-library-notice-icon"><CloudOff size={15} /></span>
           <p>You are browsing as a guest. Uploaded PDFs stay in this tab until you sign in.</p>
           <button className="button-outline small-outline" onClick={onSignIn}><Cloud size={14} /> Sign in to sync</button>
+        </div>
+      )}
+
+      {recentlyOpened.length > 0 && !showTrash && (
+        <div className="pdf-recent-strip">
+          <span className="pdf-recent-label"><Clock size={13} /> Recently opened</span>
+          <div className="pdf-recent-items">
+            {recentlyOpened.map((item) => (
+              <button key={item.id} type="button" className="pdf-recent-chip" onClick={() => onOpen(item)} title={`Open ${item.name}`}>
+                <FileText size={12} /> {pdfTitle(item.name)}
+                {activity[item.id]?.pageCount ? <span>{activity[item.id].pageCount}p</span> : null}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -129,6 +198,25 @@ export function PdfLibraryPanel({
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PDFs" />
             </label>
           )}
+          {ordered.length > 1 && (
+            <button
+              type="button"
+              className={`pdf-library-sort ${byRecent ? 'selected' : ''}`}
+              onClick={() => setByRecent((value) => !value)}
+              title="Sort by the PDF you opened most recently"
+            >
+              <Clock size={13} /> Recently opened
+            </button>
+          )}
+          <button
+            type="button"
+            className={`pdf-library-sort pdf-library-trash-toggle ${showTrash ? 'selected' : ''}`}
+            onClick={() => setShowTrash((value) => !value)}
+            title="PDFs you deleted in the last 30 days"
+          >
+            <Trash2 size={13} /> Recently deleted {deletedItems.length > 0 && <span>{deletedItems.length}</span>}
+          </button>
+
           <label className="pdf-library-subject">
             <span className="sr-only">Subject for new uploads</span>
             <select value={uploadSubject} onChange={(event) => setUploadSubject(event.target.value as Subject)} aria-label="Subject for new uploads">
@@ -157,7 +245,53 @@ export function PdfLibraryPanel({
             <span className="pdf-library-dropzone-hint">PDF only · up to 100 MB each · private to your account</span>
           </div>
 
-          {ordered.length === 0 ? (
+          {showTrash ? (
+            deletedItems.length === 0 ? (
+              <div className="pdf-library-empty">
+                <span className="pdf-library-empty-icon"><Trash2 size={20} /></span>
+                <strong>Nothing in Recently deleted</strong>
+                <p>PDFs you delete from the library wait here for {TRASH_RETENTION_DAYS} days, so one tap brings them back.</p>
+              </div>
+            ) : (
+              <>
+                <p className="pdf-trash-note">
+                  <RotateCcw size={13} /> Deleted PDFs stay here for {TRASH_RETENTION_DAYS} days. Restore brings one straight back; “Delete forever” erases its file from storage.
+                  {trashUnavailable && ' Cloud trash is unavailable until the newest database migration is run — see the setup guide.'}
+                </p>
+                <div className="pdf-library-grid">
+                  {deletedItems.map((item) => (
+                    <article key={item.id} className="pdf-library-card glass-card is-deleted">
+                      <div className="pdf-library-open is-static">
+                        <span className="pdf-library-file-icon"><FileText size={17} /></span>
+                        <span className="pdf-library-name">{pdfTitle(item.name)}</span>
+                      </div>
+                      <div className="pdf-library-card-meta">
+                        <span className={`subject-tag ${subjectClass(item.subject)}`}>{item.subject}</span>
+                        <span className="pdf-library-size">{formatSize(item.size)}</span>
+                      </div>
+                      <p className="pdf-library-trash-meta">
+                        Deleted {formatLibraryDate(deletedAt[item.id] ?? Date.now())}
+                        {' · '}
+                        {daysLeft(deletedAt[item.id] ?? Date.now()) === 0
+                          ? 'ready to be deleted for good'
+                          : `${daysLeft(deletedAt[item.id] ?? Date.now())} days left`}
+                      </p>
+                      <div className="pdf-library-card-foot">
+                        <span className="pdf-library-trash-actions">
+                          <button type="button" className="pdf-library-restore" onClick={() => onRestore(item)}>
+                            <RotateCcw size={13} /> Restore
+                          </button>
+                          <button type="button" className="pdf-library-delete-forever" onClick={() => onDeleteForever(item)}>
+                            <Trash2 size={13} /> Delete forever
+                          </button>
+                        </span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )
+          ) : ordered.length === 0 ? (
             <div className="pdf-library-empty">
               <span className="pdf-library-empty-icon"><FileText size={20} /></span>
               <strong>No PDFs yet</strong>
@@ -178,6 +312,8 @@ export function PdfLibraryPanel({
                   onDelete={() => onDelete(item)}
                   onRename={(name, subject) => onRename(item, name, subject)}
                   onAttach={() => onAttach(item)}
+                  pageCount={activity[item.id]?.pageCount ?? null}
+                  lastOpenedAt={activity[item.id]?.lastOpenedAt ?? null}
                 />
               ))}
             </div>
@@ -199,6 +335,8 @@ interface CardProps {
   item: LibraryPdf;
   attached: boolean;
   canAttach: boolean;
+  pageCount: number | null;
+  lastOpenedAt: number | null;
   onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
@@ -206,7 +344,7 @@ interface CardProps {
   onAttach: () => void;
 }
 
-function PdfCard({ item, attached, canAttach, onOpen, onDownload, onDelete, onRename, onAttach }: CardProps) {
+function PdfCard({ item, attached, canAttach, pageCount, lastOpenedAt, onOpen, onDownload, onDelete, onRename, onAttach }: CardProps) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(pdfTitle(item.name));
   const [draftSubject, setDraftSubject] = useState<Subject>(item.subject);
@@ -261,13 +399,17 @@ function PdfCard({ item, attached, canAttach, onOpen, onDownload, onDelete, onRe
 
           <div className="pdf-library-card-meta">
             <span className={`subject-tag ${subjectClass(item.subject)}`}>{item.subject}</span>
-            <span className="pdf-library-size">{formatSize(item.size)}</span>
+            <span className="pdf-library-size">
+              {formatSize(item.size)}
+              {pageCount ? ` · ${pageCount} ${pageCount === 1 ? 'page' : 'pages'}` : ''}
+            </span>
           </div>
 
           <div className="pdf-library-card-foot">
             <span className={`pdf-library-origin ${item.sessionOnly ? 'is-session' : ''}`} title={item.sessionOnly ? 'Only available in this tab' : 'Synced with your account'}>
               {item.sessionOnly ? <HardDrive size={12} /> : <Cloud size={12} />}
               {item.sessionOnly ? 'This tab only' : 'Synced'}
+              {lastOpenedAt ? <em className="pdf-library-opened">{formatLibraryDate(lastOpenedAt)}</em> : null}
             </span>
             <span className="pdf-library-card-actions">
               {canAttach && (

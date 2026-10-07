@@ -37,6 +37,10 @@ export function useDialog({ open, onClose }: { open: boolean; onClose: () => voi
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        // A small popover inside the dialog (a sticky-note editor, for example) can claim
+        // Escape for itself with data-escape-stop, so closing it does not close the dialog.
+        const target = event.target as HTMLElement | null;
+        if (target?.closest('[data-escape-stop]')) return;
         event.stopPropagation();
         onCloseRef.current();
         return;
