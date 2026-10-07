@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { ArrowUpRight, Cloud, LockKeyhole, X } from 'lucide-react';
 import { cloudConfigured, supabase } from '../lib/supabase';
+import { useDialog } from '../lib/useDialog';
 
 interface Props {
   open: boolean;
@@ -14,6 +15,8 @@ export function AuthModal({ open, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const dialogRef = useDialog({ open, onClose });
+  const titleId = useId();
 
   if (!open) return null;
 
@@ -70,11 +73,18 @@ export function AuthModal({ open, onClose }: Props) {
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="auth-modal glass-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <section
+        ref={dialogRef}
+        className="auth-modal glass-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         <button className="icon-button modal-close" onClick={onClose} aria-label="Close sign in"><X size={18} /></button>
         <div className="modal-symbol"><Cloud size={23} /></div>
         <p className="eyebrow">YOUR STUDY, EVERYWHERE</p>
-        <h2 id="auth-title">Sync your study space</h2>
+        <h2 id={titleId}>Sync your study space</h2>
         <p className="modal-copy">Keep chapters, watch progress, focus goals, and private PDF notes with your account across devices.</p>
 
         {!cloudConfigured ? (

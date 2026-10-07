@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
 import { X } from 'lucide-react';
 import { PdfViewer } from './PdfViewer';
 import { pdfTitle } from '../lib/pdfLibrary';
+import { useDialog } from '../lib/useDialog';
 import type { LibraryPdf } from '../types';
 
 interface Props {
@@ -19,18 +19,9 @@ interface Props {
 export function PdfLibraryViewer({
   item, url, loading, busy, error, status, onClose, onDownload, onDelete,
 }: Props) {
-  useEffect(() => {
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.body.style.overflow = previous;
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [onClose]);
+  // Focus trap, Escape-to-close, body scroll lock and focus restore are shared with
+  // the sign-in modal through this hook.
+  const dialogRef = useDialog({ open: true, onClose });
 
   return (
     <div
@@ -38,10 +29,12 @@ export function PdfLibraryViewer({
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <section
+        ref={dialogRef}
         className="pdf-library-modal glass-card"
         role="dialog"
         aria-modal="true"
         aria-label={`${pdfTitle(item.name)} — PDF reader`}
+        tabIndex={-1}
       >
         <header className="pdf-library-modal-head">
           <span className={`subject-tag ${item.subject.toLowerCase().replace(/\s+/g, '-')}`}>{item.subject}</span>
