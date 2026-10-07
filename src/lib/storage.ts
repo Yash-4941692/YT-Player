@@ -1,8 +1,16 @@
 import type { PersistedState, Subject, VideoRecord } from '../types';
 
 const STORAGE_KEY = 'focusframe.jee.v1';
+const PDF_TRASH_KEY = 'focusframe.pdfTrash.v1';
+const PDF_ACTIVITY_KEY = 'focusframe.pdfActivity.v1';
+const PDF_ANNOTATIONS_PREFIX = 'focusframe.pdfAnnotations.v1.';
 
 const initialState: PersistedState = { videos: [] };
+
+export interface StoredPdfActivity {
+  lastOpenedAt: number | null;
+  pageCount: number | null;
+}
 
 function isSubject(value: unknown): value is Subject {
   return value === 'Physics' || value === 'Chemistry' || value === 'Mathematics' || value === 'Other';
@@ -61,4 +69,87 @@ export function upsertVideo(list: VideoRecord[], record: VideoRecord): VideoReco
   const next = [...list];
   next[index] = record;
   return next.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function loadLocalPdfTrash(): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(PDF_TRASH_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const ts = Number(value);
+      if (key && Number.isFinite(ts) && ts > 0) out[key] = ts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function saveLocalPdfTrash(trash: Record<string, number>): void {
+  try {
+    window.localStorage.setItem(PDF_TRASH_KEY, JSON.stringify(trash));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+export function loadLocalPdfActivity(): Record<string, StoredPdfActivity> {
+  try {
+    const raw = window.localStorage.getItem(PDF_ACTIVITY_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, StoredPdfActivity> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!key || !value || typeof value !== 'object') continue;
+      const entry = value as Record<string, unknown>;
+      const lastOpenedAt = Number.isFinite(Number(entry.lastOpenedAt)) && Number(entry.lastOpenedAt) > 0
+        ? Number(entry.lastOpenedAt)
+        : null;
+      const pageCount = Number.isFinite(Number(entry.pageCount)) && Number(entry.pageCount) > 0
+        ? Number(entry.pageCount)
+        : null;
+      out[key] = { lastOpenedAt, pageCount };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function saveLocalPdfActivity(activity: Record<string, StoredPdfActivity>): void {
+  try {
+    window.localStorage.setItem(PDF_ACTIVITY_KEY, JSON.stringify(activity));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+export function loadLocalAnnotations(pdfId: string): unknown | null {
+  try {
+    const raw = window.localStorage.getItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function saveLocalAnnotations(pdfId: string, data: unknown): void {
+  try {
+    window.localStorage.setItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`, JSON.stringify(data));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+export function deleteLocalAnnotations(pdfId: string): void {
+  try {
+    window.localStorage.removeItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`);
+  } catch {
+    // Ignore storage errors.
+  }
 }

@@ -1,14 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { Trash2, X } from 'lucide-react';
 import {
-  newAnnotationId, penPath, rectFromPoints, simplifyPoints, VIEW_BOX, colorHex, PEN_COLORS, DEFAULT_PEN,
-  type Annotation, type AnnotationColor, type AnnotationTool, type NormRect, type PenColor,
+  boundsFromPoints, colorHex, DEFAULT_HIGHLIGHT_WIDTH, DEFAULT_PEN_WIDTH, DEFAULT_SHAPE_WIDTH,
+  highlightColorFor, hitsAnnotation, newAnnotationId, penPath, rectFromPoints, simplifyPoints, VIEW_BOX,
+  type Annotation, type AnnotationColor, type AnnotationTool, type NormRect,
 } from '../lib/annotations';
-
-/** Pens only accept pen colours; anything else falls back to the default ink. */
-function penColorFor(color: AnnotationColor): PenColor {
-  return PEN_COLORS.some((entry) => entry.id === color) ? color as PenColor : DEFAULT_PEN;
-}
 
 interface Props {
   /** 1-based page number this overlay belongs to. */
@@ -16,11 +12,20 @@ interface Props {
   annotations: Annotation[];
   tool: AnnotationTool;
   color: AnnotationColor;
+  strokeWidth: number;
   /** Annotation mode is on and this page accepts new drawings. */
   drawingEnabled: boolean;
   onAdd: (annotation: Annotation) => void;
   onErase: (id: string) => void;
   onUpdateNote: (id: string, text: string) => void;
+}
+
+type DraftType = 'pen' | 'highlight' | 'highlight-box' | 'rect' | 'ellipse';
+
+interface DraftStroke {
+  type: DraftType;
+  points: number[];
+  start: { x: number; y: number };
 }
 
 function localPoint(event: ReactPointerEvent, element: Element): { x: number; y: number } {
@@ -37,34 +42,60 @@ function localPoint(event: ReactPointerEvent, element: Element): { x: number; y:
  * pixels and every stroke keeps its width via vector-effect="non-scaling-stroke".
  */
 export function PdfAnnotationOverlay({
-  page, annotations, tool, color, drawingEnabled, onAdd, onErase, onUpdateNote,
+  page, annotations, tool, color, strokeWidth, drawingEnabled, onAdd, onErase, onUpdateNote,
 }: Props) {
   const layerRef = useRef<SVGSVGElement>(null);
-  const draftRef = useRef<{ type: 'pen' | 'rect' | 'ellipse'; points: number[]; start: { x: number; y: number } } | null>(null);
-  const [draft, setDraft] = useState<{ type: 'pen' | 'rect' | 'ellipse'; points: number[]; start: { x: number; y: number } } | null>(null);
+  const draftRef = useRef<DraftStroke | null>(null);
+  const erasingRef = useRef(false);
+  const [draft, setDraft] = useState<DraftStroke | null>(null);
   const [editingNote, setEditingNote] = useState<{ id: string; x: number; y: number; draft: string } | null>(null);
 
   const pageAnnotations = useMemo(() => annotations.filter((annotation) => annotation.page === page), [annotations, page]);
   const notes = pageAnnotations.filter((annotation) => annotation.type === 'note');
 
-  const drawingTool = tool === 'pen' || tool === 'rect' || tool === 'ellipse';
+  const drawingTool = tool === 'pen' || tool === 'highlight' || tool === 'rect' || tool === 'ellipse';
   const interactive = drawingEnabled && (drawingTool || tool === 'eraser');
-  const strokeWidth = tool === 'pen' ? 2.4 : 2;
+  const activeWidth = strokeWidth || (tool === 'highlight' ? DEFAULT_HIGHLIGHT_WIDTH : tool === 'pen' ? DEFAULT_PEN_WIDTH : DEFAULT_SHAPE_WIDTH);
 
   // Any tool change cancels a half-drawn shape so it cannot be committed by accident.
   useEffect(() => {
     draftRef.current = null;
+    erasingRef.current = false;
     setDraft(null);
   }, [tool]);
 
+  function eraseAtPoint(point: { x: number; y: number }) {
+    for (const annotation of pageAnnotations) {
+      if (hitsAnnotation(annotation, point.x, point.y)) {
+        onErase(annotation.id);
+      }
+    }
+  }
+
   function handlePointerDown(event: ReactPointerEvent<SVGSVGElement>) {
-    if (!drawingEnabled || !drawingTool || event.button !== 0) return;
+    if (!drawingEnabled || event.button !== 0) return;
     const element = layerRef.current;
     if (!element) return;
     const point = localPoint(event, element);
+
+    if (tool === 'eraser') {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      erasingRef.current = true;
+      eraseAtPoint(point);
+      return;
+    }
+
+    if (!drawingTool) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    const next = {
-      type: tool === 'pen' ? 'pen' as const : tool === 'rect' ? 'rect' as const : 'ellipse' as const,
+    const type: DraftType = tool === 'pen'
+      ? 'pen'
+      : tool === 'highlight'
+        ? (event.shiftKey ? 'highlight-box' : 'highlight')
+        : tool === 'rect'
+          ? 'rect'
+          : 'ellipse';
+    const next: DraftStroke = {
+      type,
       points: [point.x, point.y],
       start: point,
     };
@@ -73,11 +104,16 @@ export function PdfAnnotationOverlay({
   }
 
   function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
-    const current = draftRef.current;
     const element = layerRef.current;
-    if (!current || !element) return;
+    if (!element) return;
+    if (erasingRef.current && tool === 'eraser') {
+      eraseAtPoint(localPoint(event, element));
+      return;
+    }
+    const current = draftRef.current;
+    if (!current) return;
     const point = localPoint(event, element);
-    if (current.type === 'pen') {
+    if (current.type === 'pen' || current.type === 'highlight') {
       current.points.push(point.x, point.y);
     } else {
       current.points[2] = point.x;
@@ -87,6 +123,13 @@ export function PdfAnnotationOverlay({
   }
 
   function finishStroke(event: ReactPointerEvent<SVGSVGElement>) {
+    if (erasingRef.current) {
+      erasingRef.current = false;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
     const current = draftRef.current;
     draftRef.current = null;
     setDraft(null);
@@ -102,24 +145,53 @@ export function PdfAnnotationOverlay({
           id: newAnnotationId(),
           type: 'pen',
           page,
-          // A pen stroke always uses a pen colour; if a highlight colour is selected
-          // (for example right after switching tools) fall back to the default ink.
-          color: penColorFor(color),
+          color,
           points,
-          width: 2.4,
+          width: activeWidth,
         });
       }
       return;
     }
+
+    if (current.type === 'highlight') {
+      const points = simplifyPoints(current.points);
+      if (points.length >= 4) {
+        const bounds = boundsFromPoints(points);
+        onAdd({
+          id: newAnnotationId(),
+          type: 'highlight',
+          page,
+          color: highlightColorFor(color),
+          rects: bounds ? [bounds] : [],
+          points,
+          width: activeWidth,
+          source: 'marker',
+        });
+      }
+      return;
+    }
+
     const rect = rectFromPoints(current.start.x, current.start.y, current.points[2], current.points[3]);
     if (!rect) return;
+    if (current.type === 'highlight-box') {
+      onAdd({
+        id: newAnnotationId(),
+        type: 'highlight',
+        page,
+        color: highlightColorFor(color),
+        rects: [rect],
+        width: activeWidth,
+        source: 'box',
+      });
+      return;
+    }
     onAdd({
       id: newAnnotationId(),
       type: current.type,
       page,
       color,
       rect,
-      width: strokeWidth,
+      width: activeWidth,
     });
   }
 
@@ -155,19 +227,37 @@ export function PdfAnnotationOverlay({
         preserveAspectRatio="none"
         aria-hidden="true"
         style={{
+          pointerEvents: interactive ? 'auto' : 'none',
           touchAction: interactive ? 'none' : 'auto',
           cursor: drawingTool ? 'crosshair' : tool === 'eraser' ? 'cell' : 'default',
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishStroke}
-        onPointerCancel={() => { draftRef.current = null; setDraft(null); }}
+        onPointerCancel={() => { draftRef.current = null; erasingRef.current = false; setDraft(null); }}
       >
         {pageAnnotations.map((annotation) => {
           const eraseProps = tool === 'eraser'
             ? { onPointerDown: (event: ReactPointerEvent) => { event.stopPropagation(); onErase(annotation.id); } }
             : {};
           if (annotation.type === 'highlight') {
+            if (annotation.points && annotation.points.length >= 4) {
+              return (
+                <path
+                  key={annotation.id}
+                  d={penPath(annotation.points)}
+                  fill="none"
+                  stroke={colorHex(annotation.color)}
+                  strokeOpacity={0.38}
+                  strokeWidth={annotation.width || DEFAULT_HIGHLIGHT_WIDTH}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
+                  style={{ pointerEvents: tool === 'eraser' ? 'stroke' : 'none' }}
+                  {...eraseProps}
+                />
+              );
+            }
             return (
               <g key={annotation.id} {...eraseProps}>
                 {annotation.rects.map((rect, index) => (
@@ -178,7 +268,7 @@ export function PdfAnnotationOverlay({
                     width={rect.w * VIEW_BOX}
                     height={rect.h * VIEW_BOX}
                     fill={colorHex(annotation.color)}
-                    fillOpacity={0.34}
+                    fillOpacity={0.36}
                     style={{ pointerEvents: tool === 'eraser' ? 'auto' : 'none' }}
                   />
                 ))}
@@ -192,7 +282,7 @@ export function PdfAnnotationOverlay({
                 d={penPath(annotation.points)}
                 fill="none"
                 stroke={colorHex(annotation.color)}
-                strokeWidth={annotation.width}
+                strokeWidth={annotation.width || DEFAULT_PEN_WIDTH}
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 vectorEffect="non-scaling-stroke"
@@ -211,7 +301,7 @@ export function PdfAnnotationOverlay({
                 height={annotation.rect.h * VIEW_BOX}
                 fill="none"
                 stroke={colorHex(annotation.color)}
-                strokeWidth={annotation.width}
+                strokeWidth={annotation.width || DEFAULT_SHAPE_WIDTH}
                 vectorEffect="non-scaling-stroke"
                 style={{ pointerEvents: tool === 'eraser' ? 'auto' : 'none' }}
                 {...eraseProps}
@@ -228,7 +318,7 @@ export function PdfAnnotationOverlay({
                 ry={(annotation.rect.h / 2) * VIEW_BOX}
                 fill="none"
                 stroke={colorHex(annotation.color)}
-                strokeWidth={annotation.width}
+                strokeWidth={annotation.width || DEFAULT_SHAPE_WIDTH}
                 vectorEffect="non-scaling-stroke"
                 style={{ pointerEvents: tool === 'eraser' ? 'auto' : 'none' }}
                 {...eraseProps}
@@ -238,25 +328,39 @@ export function PdfAnnotationOverlay({
           return null;
         })}
 
-        {draft && draft.type === 'pen' && (
+        {draft && (draft.type === 'pen' || draft.type === 'highlight') && (
           <path
             d={penPath(draft.points)}
             fill="none"
             stroke={colorHex(color)}
-            strokeWidth={2.4}
+            strokeOpacity={draft.type === 'highlight' ? 0.38 : 1}
+            strokeWidth={activeWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
             vectorEffect="non-scaling-stroke"
             style={{ pointerEvents: 'none' }}
           />
         )}
-        {draft && draft.type !== 'pen' && (() => {
+        {draft && draft.type !== 'pen' && draft.type !== 'highlight' && (() => {
           const rect: NormRect | null = rectFromPoints(draft.start.x, draft.start.y, draft.points[2], draft.points[3]);
           if (!rect) return null;
+          if (draft.type === 'highlight-box') {
+            return (
+              <rect
+                x={rect.x * VIEW_BOX}
+                y={rect.y * VIEW_BOX}
+                width={rect.w * VIEW_BOX}
+                height={rect.h * VIEW_BOX}
+                fill={colorHex(color)}
+                fillOpacity={0.36}
+                style={{ pointerEvents: 'none' }}
+              />
+            );
+          }
           const common = {
             fill: 'none',
             stroke: colorHex(color),
-            strokeWidth: strokeWidth,
+            strokeWidth: activeWidth,
             strokeDasharray: '7 5',
             vectorEffect: 'non-scaling-stroke' as const,
             style: { pointerEvents: 'none' as const },

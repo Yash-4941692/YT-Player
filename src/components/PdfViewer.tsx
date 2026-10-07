@@ -70,6 +70,7 @@ export interface PdfAnnotationBridge {
   annotations: Annotation[];
   tool: AnnotationTool;
   color: AnnotationColor;
+  strokeWidth: number;
   dirty: boolean;
   saving: boolean;
   canUndo: boolean;
@@ -79,6 +80,7 @@ export interface PdfAnnotationBridge {
   canSave: boolean;
   onToolChange: (tool: AnnotationTool) => void;
   onColorChange: (color: AnnotationColor) => void;
+  onStrokeWidthChange: (width: number) => void;
   onAdd: (annotation: Annotation) => void;
   onErase: (id: string) => void;
   onUpdateNote: (id: string, text: string) => void;
@@ -478,21 +480,30 @@ export function PdfViewer({
     perPage.forEach((rects, pageNumber) => {
       const merged = mergeLineRects(rects);
       if (merged.length === 0) return;
+      const scale = Math.max(0.6, Math.min(2.2, (bridge.strokeWidth || 14) / 14));
+      const scaled = merged.map((rect) => {
+        const nextH = Math.min(1, rect.h * scale);
+        const nextY = Math.max(0, Math.min(1 - nextH, rect.y - (nextH - rect.h) / 2));
+        return { ...rect, y: nextY, h: nextH };
+      });
       bridge.onAdd({
         id: newAnnotationId(),
         type: 'highlight',
         page: pageNumber,
         color: highlightColorFor(bridge.color),
-        rects: merged,
+        rects: scaled,
+        width: bridge.strokeWidth,
         source: 'words',
       });
     });
     selection.removeAllRanges();
   }, []);
 
-  // A selection anywhere in the reader becomes a highlight while the highlight tool is on.
+  // A selection anywhere in the reader becomes a highlight while the highlight tool is on,
+  // or immediately when the user switches to the highlight tool after selecting text.
   useEffect(() => {
     if (!annotations || annotations.tool !== 'highlight' || !textLayerAvailable) return;
+    commitSelectionHighlight();
     const onPointerUp = () => window.setTimeout(commitSelectionHighlight, 0);
     const onKeyUp = (event: KeyboardEvent) => { if (event.key === 'Shift') window.setTimeout(commitSelectionHighlight, 0); };
     document.addEventListener('pointerup', onPointerUp);
@@ -517,6 +528,7 @@ export function PdfViewer({
         <PdfAnnotationToolbar
           tool={annotations.tool}
           color={annotations.color}
+          strokeWidth={annotations.strokeWidth}
           guest={annotations.guest}
           dirty={annotations.dirty}
           saving={annotations.saving}
@@ -527,6 +539,7 @@ export function PdfViewer({
           wordHighlights={textLayerAvailable}
           onToolChange={annotations.onToolChange}
           onColorChange={annotations.onColorChange}
+          onStrokeWidthChange={annotations.onStrokeWidthChange}
           onUndo={annotations.onUndo}
           onRedo={annotations.onRedo}
           onSave={annotations.onSave}
@@ -617,7 +630,11 @@ export function PdfViewer({
                     if (element) pagesRef.current.set(pageNumber, element);
                     else pagesRef.current.delete(pageNumber);
                   }}
-                  style={placeholderHeight ? { minHeight: `${placeholderHeight}px` } : undefined}
+                  style={{
+                    width: zoom === 100 ? '100%' : `${zoom}%`,
+                    aspectRatio: String(aspect),
+                    ...(placeholderHeight && zoom === 100 ? { minHeight: `${placeholderHeight}px` } : {}),
+                  }}
                 >
                   <canvas
                     ref={(element) => {
@@ -646,6 +663,7 @@ export function PdfViewer({
                       annotations={annotations.annotations}
                       tool={annotations.tool}
                       color={annotations.color}
+                      strokeWidth={annotations.strokeWidth}
                       drawingEnabled={viewerStatus === 'ready' && annotations.tool !== 'select'}
                       onAdd={annotations.onAdd}
                       onErase={annotations.onErase}

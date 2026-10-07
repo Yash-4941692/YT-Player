@@ -25,17 +25,21 @@ export interface HighlightAnnotation {
   id: string;
   type: 'highlight';
   page: number;
-  color: HighlightColor;
+  color: AnnotationColor;
   rects: NormRect[];
-  /** 'words' when the boxes came from a real text selection, 'box' for a dragged rectangle. */
-  source?: 'words' | 'box';
+  /** 'words' when the boxes came from a real text selection, 'box' for a dragged rectangle, 'marker' for a freehand marker stroke. */
+  source?: 'words' | 'box' | 'marker';
+  /** Optional flattened [x0, y0, x1, y1, …] normalised points for a freehand marker highlight. */
+  points?: number[];
+  /** Marker stroke thickness in screen pixels, kept constant with non-scaling-stroke. */
+  width?: number;
 }
 
 export interface PenAnnotation {
   id: string;
   type: 'pen';
   page: number;
-  color: PenColor;
+  color: AnnotationColor;
   /** Flattened [x0, y0, x1, y1, …] normalised points. */
   points: number[];
   /** Line width in screen pixels, kept constant with non-scaling-stroke. */
@@ -83,25 +87,57 @@ export const PEN_COLORS: { id: PenColor; label: string; hex: string }[] = [
   { id: 'blue', label: 'Blue', hex: '#2f6fed' },
 ];
 
+export const ALL_COLORS: { id: AnnotationColor; label: string; hex: string }[] = [
+  { id: 'yellow', label: 'Yellow', hex: '#ffd166' },
+  { id: 'green', label: 'Green', hex: '#8ce99a' },
+  { id: 'pink', label: 'Pink', hex: '#ff9ecb' },
+  { id: 'blue', label: 'Blue', hex: '#8ac6ff' },
+  { id: 'red', label: 'Red', hex: '#e0483f' },
+  { id: 'black', label: 'Black', hex: '#111318' },
+];
+
 export const DEFAULT_HIGHLIGHT: HighlightColor = 'yellow';
 export const DEFAULT_PEN: PenColor = 'red';
 
-/** Colour used by shapes and sticky notes, which share the highlight palette. */
+export const DEFAULT_PEN_WIDTH = 3;
+export const DEFAULT_HIGHLIGHT_WIDTH = 14;
+export const DEFAULT_SHAPE_WIDTH = 3;
+
+export const PEN_WIDTH_PRESETS: { width: number; label: string }[] = [
+  { width: 2, label: 'Thin (2px)' },
+  { width: 4, label: 'Medium (4px)' },
+  { width: 8, label: 'Thick (8px)' },
+  { width: 14, label: 'Bold (14px)' },
+];
+
+export const HIGHLIGHT_WIDTH_PRESETS: { width: number; label: string }[] = [
+  { width: 8, label: 'Fine marker (8px)' },
+  { width: 14, label: 'Medium marker (14px)' },
+  { width: 22, label: 'Wide marker (22px)' },
+  { width: 32, label: 'Extra wide marker (32px)' },
+];
+
+/** Colour used by annotations across all tools. */
 export function colorHex(color: AnnotationColor): string {
   return (
-    HIGHLIGHT_COLORS.find((entry) => entry.id === color)?.hex
+    ALL_COLORS.find((entry) => entry.id === color)?.hex
+    ?? HIGHLIGHT_COLORS.find((entry) => entry.id === color)?.hex
     ?? PEN_COLORS.find((entry) => entry.id === color)?.hex
     ?? '#ffd166'
   );
+}
+
+export function isValidAnnotationColor(color: unknown): color is AnnotationColor {
+  return typeof color === 'string' && ALL_COLORS.some((entry) => entry.id === color);
 }
 
 export function isHighlightColor(color: AnnotationColor): color is HighlightColor {
   return HIGHLIGHT_COLORS.some((entry) => entry.id === color);
 }
 
-/** Highlights only accept highlight colours; anything else becomes the default. */
-export function highlightColorFor(color: AnnotationColor): HighlightColor {
-  return isHighlightColor(color) ? color : DEFAULT_HIGHLIGHT;
+/** Highlights accept any annotation colour, falling back to the default yellow. */
+export function highlightColorFor(color: AnnotationColor): AnnotationColor {
+  return isValidAnnotationColor(color) ? color : DEFAULT_HIGHLIGHT;
 }
 
 function clamp01(value: number): number {
@@ -125,6 +161,28 @@ export function rectFromPoints(x1: number, y1: number, x2: number, y2: number): 
   return { x: round4(x), y: round4(y), w: round4(w), h: round4(h) };
 }
 
+/** Compute a bounding box around a flattened [x0, y0, x1, y1, …] point list. */
+export function boundsFromPoints(points: number[], pad = 0.006): NormRect | null {
+  if (points.length < 4) return null;
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (let i = 0; i + 1 < points.length; i += 2) {
+    const x = clamp01(points[i]);
+    const y = clamp01(points[i + 1]);
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  const x = clamp01(minX - pad);
+  const y = clamp01(minY - pad);
+  const w = Math.max(0.004, clamp01(maxX + pad) - x);
+  const h = Math.max(0.004, clamp01(maxY + pad) - y);
+  return { x: round4(x), y: round4(y), w: round4(w), h: round4(h) };
+}
+
 /** Absolute-positioned SVG viewBox of 0..1000 gives sub-pixel accuracy for free. */
 export const VIEW_BOX = 1000;
 
@@ -133,7 +191,7 @@ export function round4(value: number): number {
 }
 
 /**
- * Pen strokes arrive one point per pointer event, which is far more detail than needed.
+ * Pen and marker strokes arrive one point per pointer event, which is far more detail than needed.
  * Points closer than `minDistance` (normalised) are dropped or merged, so a long stroke
  * stays small enough to sync happily and still looks smooth.
  */
@@ -171,10 +229,18 @@ export function annotationsForPage(annotations: Annotation[], page: number): Ann
 }
 
 /** Eraser hit test: is this normalised point on the annotation? */
-export function hitsAnnotation(annotation: Annotation, x: number, y: number, pad = 0.012): boolean {
+export function hitsAnnotation(annotation: Annotation, x: number, y: number, pad = 0.015): boolean {
   if (annotation.type === 'pen') {
+    const strokePad = Math.max(pad, ((annotation.width || DEFAULT_PEN_WIDTH) / VIEW_BOX) * 1.4);
     for (let i = 0; i + 3 < annotation.points.length; i += 2) {
-      if (segmentDistance(x, y, annotation.points[i], annotation.points[i + 1], annotation.points[i + 2], annotation.points[i + 3]) <= pad) return true;
+      if (segmentDistance(x, y, annotation.points[i], annotation.points[i + 1], annotation.points[i + 2], annotation.points[i + 3]) <= strokePad) return true;
+    }
+    return false;
+  }
+  if (annotation.type === 'highlight' && annotation.points && annotation.points.length >= 4) {
+    const strokePad = Math.max(pad, ((annotation.width || DEFAULT_HIGHLIGHT_WIDTH) / VIEW_BOX) * 1.4);
+    for (let i = 0; i + 3 < annotation.points.length; i += 2) {
+      if (segmentDistance(x, y, annotation.points[i], annotation.points[i + 1], annotation.points[i + 2], annotation.points[i + 3]) <= strokePad) return true;
     }
     return false;
   }
@@ -202,10 +268,19 @@ function segmentDistance(px: number, py: number, x1: number, y1: number, x2: num
  */
 export function normalizeDocument(value: unknown): AnnotationDocument {
   if (!value || typeof value !== 'object') return EMPTY_ANNOTATION_DOCUMENT;
-  const raw = value as Partial<AnnotationDocument> & { annotations?: unknown };
-  if (!Array.isArray(raw.annotations)) return EMPTY_ANNOTATION_DOCUMENT;
+  const raw = value as Partial<AnnotationDocument> & { annotations?: unknown; data?: unknown };
+  const candidateList = Array.isArray(raw.annotations)
+    ? raw.annotations
+    : (raw.annotations && typeof raw.annotations === 'object' && Array.isArray((raw.annotations as { annotations?: unknown }).annotations))
+      ? (raw.annotations as { annotations: unknown[] }).annotations
+      : (raw.data && typeof raw.data === 'object' && Array.isArray((raw.data as { annotations?: unknown }).annotations))
+        ? (raw.data as { annotations: unknown[] }).annotations
+        : Array.isArray(value)
+          ? value
+          : null;
+  if (!candidateList) return EMPTY_ANNOTATION_DOCUMENT;
   const annotations: Annotation[] = [];
-  for (const entry of raw.annotations) {
+  for (const entry of candidateList) {
     const annotation = normalizeAnnotation(entry);
     if (annotation) annotations.push(annotation);
   }
@@ -220,27 +295,45 @@ function normalizeAnnotation(value: unknown): Annotation | null {
   const type = item.type;
 
   if (type === 'highlight') {
-    const rects = Array.isArray(item.rects) ? item.rects.map(normalizeRect).filter((rect): rect is NormRect => rect !== null) : [];
-    if (rects.length === 0) return null;
-    const color = isHighlightColor(item.color as AnnotationColor) ? item.color as HighlightColor : DEFAULT_HIGHLIGHT;
-    const source = item.source === 'box' ? 'box' : 'words';
-    return { id, type, page, color, rects, source };
+    const points = Array.isArray(item.points)
+      ? item.points.map(Number).filter(Number.isFinite).map(clamp01)
+      : undefined;
+    const validPoints = points && points.length >= 4 ? points : undefined;
+    let rects = Array.isArray(item.rects) ? item.rects.map(normalizeRect).filter((rect): rect is NormRect => rect !== null) : [];
+    if (rects.length === 0 && validPoints) {
+      const bounds = boundsFromPoints(validPoints);
+      if (bounds) rects = [bounds];
+    }
+    if (rects.length === 0 && !validPoints) return null;
+    const color = isValidAnnotationColor(item.color) ? item.color : DEFAULT_HIGHLIGHT;
+    const source = item.source === 'box' ? 'box' : item.source === 'marker' || validPoints ? 'marker' : 'words';
+    const width = item.width !== undefined ? clampNumber(Number(item.width), 2, 48, DEFAULT_HIGHLIGHT_WIDTH) : undefined;
+    return {
+      id,
+      type,
+      page,
+      color,
+      rects,
+      source,
+      ...(validPoints ? { points: validPoints } : {}),
+      ...(width !== undefined ? { width } : {}),
+    };
   }
   if (type === 'pen') {
     const points = Array.isArray(item.points) ? item.points.map(Number).filter(Number.isFinite) : [];
     if (points.length < 4) return null;
-    const color = PEN_COLORS.some((entry) => entry.id === item.color) ? item.color as PenColor : DEFAULT_PEN;
-    return { id, type, page, color, points: points.map(clamp01), width: clampNumber(Number(item.width), 1, 12, 3) };
+    const color = isValidAnnotationColor(item.color) ? item.color : DEFAULT_PEN;
+    return { id, type, page, color, points: points.map(clamp01), width: clampNumber(Number(item.width), 1, 40, DEFAULT_PEN_WIDTH) };
   }
   if (type === 'rect' || type === 'ellipse') {
     const rect = normalizeRect(item.rect);
     if (!rect) return null;
-    const color = (colorHex(item.color as AnnotationColor) ? item.color as AnnotationColor : DEFAULT_HIGHLIGHT);
-    return { id, type, page, color, rect, width: clampNumber(Number(item.width), 1, 12, 3) };
+    const color = isValidAnnotationColor(item.color) ? item.color : DEFAULT_HIGHLIGHT;
+    return { id, type, page, color, rect, width: clampNumber(Number(item.width), 1, 40, DEFAULT_SHAPE_WIDTH) };
   }
   if (type === 'note') {
     const text = typeof item.text === 'string' ? item.text.slice(0, 2000) : '';
-    const color = (colorHex(item.color as AnnotationColor) ? item.color as AnnotationColor : DEFAULT_HIGHLIGHT);
+    const color = isValidAnnotationColor(item.color) ? item.color : DEFAULT_HIGHLIGHT;
     return { id, type, page, color, x: clamp01(Number(item.x)), y: clamp01(Number(item.y)), text };
   }
   return null;

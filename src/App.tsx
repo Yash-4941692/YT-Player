@@ -7,7 +7,7 @@ import {
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
 import { PdfLibraryPanel } from './components/PdfLibraryPanel';
-import { PdfLibraryViewer } from './components/PdfLibraryViewer';
+import { PdfLibraryViewer, usePdfAnnotationController } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
@@ -16,8 +16,11 @@ import {
   isLibraryPath, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase, trashLibraryPdf,
   updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
-import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
-import { pdfTitle, sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
+import {
+  deleteLocalAnnotations, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState,
+  saveLocalPdfActivity, saveLocalPdfTrash, saveLocalState, upsertVideo,
+} from './lib/storage';
+import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
 import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
 import './styles.css';
@@ -102,9 +105,9 @@ export default function App() {
   const [libraryUrl, setLibraryUrl] = useState('');
   const [libraryUrlLoading, setLibraryUrlLoading] = useState(false);
   const [libraryLoadedFor, setLibraryLoadedFor] = useState<string | null>(null);
-  // "Recently deleted" PDFs (pdf id -> when it was deleted) and per-PDF activity.
-  const [pdfTrash, setPdfTrash] = useState<Record<string, number>>({});
-  const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>({});
+  // "Recently deleted" PDFs (pdf id -> when it was deleted) and per-PDF activity, backed by localStorage.
+  const [pdfTrash, setPdfTrash] = useState<Record<string, number>>(loadLocalPdfTrash);
+  const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>(loadLocalPdfActivity);
   const [trashUnavailable, setTrashUnavailable] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
@@ -140,6 +143,18 @@ export default function App() {
   const activeSubject = activeRecord?.subject ?? selectedSubject;
   const activeTitle = activeRecord?.title || (playerReady ? 'YouTube lesson' : 'Your lesson is loading…');
 
+  const linkedLibraryPdf = useMemo(
+    () => (activeRecord?.pdfPath ? libraryPdfs.find((item) => item.storagePath && item.storagePath === activeRecord.pdfPath) ?? null : null),
+    [activeRecord?.pdfPath, libraryPdfs],
+  );
+  const lessonPdfId = linkedLibraryPdf?.id ?? (activeVideoId && pdfPreview?.url ? `lesson:${activeVideoId}` : null);
+  const lessonAnnotations = usePdfAnnotationController({
+    pdfId: lessonPdfId,
+    isGuest: Boolean(!authUser || !linkedLibraryPdf || linkedLibraryPdf.sessionOnly),
+    userId: authUser?.id ?? null,
+    shortcutsEnabled: !openLibraryPdf && panelView === 'notes',
+  });
+
   const showToast = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(''), 3200);
@@ -157,6 +172,14 @@ export default function App() {
     const state: PersistedState = { videos };
     setStorageAvailable(saveLocalState(state));
   }, [videos]);
+
+  useEffect(() => {
+    saveLocalPdfTrash(pdfTrash);
+  }, [pdfTrash]);
+
+  useEffect(() => {
+    saveLocalPdfActivity(pdfActivity);
+  }, [pdfActivity]);
 
   useEffect(() => {
     if (!supabase) {
@@ -274,28 +297,40 @@ export default function App() {
     })();
   }, [authUser?.id, libraryLoadedFor, libraryPdfs, showToast]);
 
-  // Push local changes to the account. Only lessons whose updatedAt differs from the last
-  // successful push are uploaded, plus one full pass right after the cloud list is merged.
   // "Recently deleted" and activity live in two small optional tables. If the owner has not
-  // run the newest migration yet, the library simply works without those extras.
+  // run the newest migration yet, the library keeps working with local storage.
   useEffect(() => {
     if (!cloudConfigured || !authUser || libraryLoadedFor !== authUser.id || !supabase) return;
     let cancelled = false;
     (async () => {
-      try {
-        const [trash, activity] = await Promise.all([
-          fetchPdfTrash(authUser.id),
-          fetchPdfActivity(authUser.id),
-        ]);
-        if (cancelled) return;
-        setPdfTrash(Object.fromEntries(trash.map((entry) => [entry.pdfId, entry.deletedAt])));
-        setPdfActivity(Object.fromEntries(activity.map((entry) => [
+      const [trashResult, activityResult] = await Promise.allSettled([
+        fetchPdfTrash(authUser.id),
+        fetchPdfActivity(authUser.id),
+      ]);
+      if (cancelled) return;
+      if (trashResult.status === 'fulfilled') {
+        const remoteTrash = Object.fromEntries(trashResult.value.map((entry) => [entry.pdfId, entry.deletedAt]));
+        setPdfTrash((current) => ({ ...current, ...remoteTrash }));
+        setTrashUnavailable(false);
+      } else {
+        setTrashUnavailable(true);
+      }
+      if (activityResult.status === 'fulfilled') {
+        const remoteActivity = Object.fromEntries(activityResult.value.map((entry) => [
           entry.pdfId,
           { lastOpenedAt: entry.lastOpenedAt, pageCount: entry.pageCount },
-        ])));
-        setTrashUnavailable(false);
-      } catch {
-        if (!cancelled) setTrashUnavailable(true);
+        ]));
+        setPdfActivity((current) => {
+          const merged = { ...current };
+          for (const [pdfId, info] of Object.entries(remoteActivity)) {
+            const localInfo = merged[pdfId];
+            merged[pdfId] = {
+              lastOpenedAt: Math.max(localInfo?.lastOpenedAt ?? 0, info.lastOpenedAt ?? 0) || null,
+              pageCount: info.pageCount ?? localInfo?.pageCount ?? null,
+            };
+          }
+          return merged;
+        });
       }
     })();
     return () => { cancelled = true; };
@@ -553,10 +588,8 @@ export default function App() {
   }
 
   function archiveVideo(record: VideoRecord) {
-    const confirmed = window.confirm(`Remove “${record.title}” from your library? Your progress stays saved and re-opening the link brings it back.`);
-    if (!confirmed) return;
     updateVideo(record.videoId, { archived: true });
-    showToast('Removed from your library.');
+    showToast('Removed from your library. You can restore it from Removed.');
   }
 
   async function downloadPdf(pdf: PdfPreview) {
@@ -632,58 +665,45 @@ export default function App() {
     }
   }
 
-  /** Deleting from the library now moves the PDF to "Recently deleted" instead of erasing it. */
+  /** Deleting from the library moves the PDF to "Recently deleted" so it can be restored or deleted forever. */
   async function deleteLibraryItem(item: LibraryPdf) {
-    const confirmed = window.confirm(`Move “${pdfTitle(item.name)}” to Recently deleted? You can restore it for the next 30 days.`);
-    if (!confirmed) return;
     setLibraryError('');
     const deletedAt = Date.now();
-    if (!item.sessionOnly && authUser && supabase) {
-      setLibraryBusy(true);
-      try {
-        await trashLibraryPdf(authUser.id, item.id);
-      } catch (error) {
-        setLibraryBusy(false);
-        setLibraryError(error instanceof Error
-          ? `Could not move this PDF to Recently deleted. ${error.message}`
-          : 'Could not move this PDF to Recently deleted.');
-        return;
-      }
-      setLibraryBusy(false);
-    }
     setPdfTrash((current) => ({ ...current, [item.id]: deletedAt }));
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
     showToast('PDF moved to Recently deleted.');
+
+    if (!item.sessionOnly && authUser && supabase) {
+      try {
+        await trashLibraryPdf(authUser.id, item.id);
+      } catch {
+        // Fail soft if the optional pdf_trash table is not migrated yet; local trash still persists.
+        setTrashUnavailable(true);
+      }
+    }
   }
 
   /** Bring a PDF back from "Recently deleted". Nothing was removed from storage. */
   async function restoreTrashedPdf(item: LibraryPdf) {
     setLibraryError('');
-    if (!item.sessionOnly && authUser && supabase) {
-      setLibraryBusy(true);
-      try {
-        await restoreLibraryPdf(authUser.id, item.id);
-      } catch (error) {
-        setLibraryBusy(false);
-        setLibraryError(error instanceof Error
-          ? `Could not restore this PDF. ${error.message}`
-          : 'Could not restore this PDF.');
-        return;
-      }
-      setLibraryBusy(false);
-    }
     setPdfTrash((current) => {
       const next = { ...current };
       delete next[item.id];
       return next;
     });
     showToast('PDF restored to your library.');
+
+    if (!item.sessionOnly && authUser && supabase) {
+      try {
+        await restoreLibraryPdf(authUser.id, item.id);
+      } catch {
+        setTrashUnavailable(true);
+      }
+    }
   }
 
   /** "Delete forever": removes the file from storage and the row from the library. */
   async function deleteLibraryItemForever(item: LibraryPdf) {
-    const confirmed = window.confirm(`Delete “${pdfTitle(item.name)}” forever?\n\nThe PDF file is erased from your storage and this cannot be undone.`);
-    if (!confirmed) return;
     setLibraryError('');
     if (!item.sessionOnly && authUser && supabase) {
       setLibraryBusy(true);
@@ -697,10 +717,13 @@ export default function App() {
         return;
       }
       setLibraryBusy(false);
-      // Any lesson still pointing at this PDF keeps its timestamps — only the notes link clears.
+    }
+
+    // Any lesson still pointing at this PDF keeps its timestamps — only the notes link clears.
+    if (item.storagePath) {
       setVideos((current) => current.map((video) => (
         video.pdfPath && video.pdfPath === item.storagePath
-          ? { ...video, pdfPath: undefined, pdfName: undefined, pdfSize: undefined }
+          ? { ...video, pdfPath: undefined, pdfName: undefined, pdfSize: undefined, updatedAt: Date.now() }
           : video
       )));
     }
@@ -710,6 +733,12 @@ export default function App() {
       delete next[item.id];
       return next;
     });
+    setPdfActivity((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
+    deleteLocalAnnotations(item.id);
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
     showToast('PDF deleted forever.');
   }
@@ -724,7 +753,9 @@ export default function App() {
     try {
       await updateLibraryPdf(authUser.id, item.id, { name: nextName, subject });
       setVideos((current) => current.map((video) => (
-        video.pdfPath && video.pdfPath === item.storagePath ? { ...video, pdfName: nextName } : video
+        video.pdfPath && video.pdfPath === item.storagePath
+          ? { ...video, pdfName: nextName, updatedAt: Date.now() }
+          : video
       )));
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : 'Could not rename this PDF.');
@@ -750,16 +781,34 @@ export default function App() {
       ...current,
       [pdfId]: { lastOpenedAt: current[pdfId]?.lastOpenedAt ?? Date.now(), pageCount },
     }));
-    if (authUser) void savePdfActivity(authUser.id, pdfId, { lastOpenedAt: Date.now(), pageCount }).catch(() => undefined);
+    if (authUser && !pdfId.startsWith('lesson:')) {
+      void savePdfActivity(authUser.id, pdfId, { lastOpenedAt: Date.now(), pageCount }).catch(() => undefined);
+    }
   }
 
   function attachLibraryPdf(item: LibraryPdf) {
-    if (item.sessionOnly) {
-      setLibraryError('Sign in to attach library PDFs to a lesson.');
-      return;
-    }
     if (!activeVideoId) {
       setLibraryError('Load a lesson first, then attach a PDF to it.');
+      return;
+    }
+    if (item.sessionOnly) {
+      if (!item.file) {
+        setLibraryError('Sign in to attach library PDFs to a lesson.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = String(reader.result || '');
+        notesSessionRef.current[activeVideoId] = { data, name: item.name, size: item.size };
+        updateVideo(activeVideoId, { pdfName: item.name, pdfSize: item.size });
+        setNotesRevision((value) => value + 1);
+        setPdfError('');
+        setPdfStatus('Attached for this session.');
+        setPanelView('notes');
+        notePdfOpened(item);
+        showToast('PDF attached to this lesson.');
+      };
+      reader.readAsDataURL(item.file);
       return;
     }
     setLibraryError('');
@@ -770,6 +819,7 @@ export default function App() {
     setPdfError('');
     setPdfStatus('');
     setPanelView('notes');
+    notePdfOpened(item);
     showToast('PDF attached to this lesson.');
   }
 
@@ -846,13 +896,14 @@ export default function App() {
     if (activeRecord?.pdfPath && authUser && supabase && !isLibraryPath(activeRecord.pdfPath)) {
       try {
         await deleteCloudPdf(activeRecord.pdfPath);
-      } catch (error) {
-        setPdfError(error instanceof Error ? `Could not remove the cloud copy. ${error.message}` : 'Could not remove the cloud copy.');
-        return;
+      } catch {
+        // Ignore storage removal errors so the lesson's PDF pointer can still be cleared.
       }
     }
     delete notesSessionRef.current[activeVideoId];
+    deleteLocalAnnotations(`lesson:${activeVideoId}`);
     updateVideo(activeVideoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
+    setPdfPreview(null);
     setNotesRevision((value) => value + 1);
     setPdfStatus('');
     setPdfError('');
@@ -893,24 +944,14 @@ export default function App() {
   async function deleteVideoForever(record: VideoRecord) {
     const keepLibraryPdf = pdfLinkedFromLibrary(record.pdfPath);
     const removesLessonPdf = Boolean(record.pdfPath) && !keepLibraryPdf;
-    const fileNote = removesLessonPdf
-      ? '\n\nIts saved PDF will also be deleted from your storage.'
-      : keepLibraryPdf
-        ? '\n\nIts PDF is part of your PDF library, so that file is kept.'
-        : '';
-    const confirmed = window.confirm(`Delete “${record.title}” forever?${fileNote}\n\nThis removes the lesson, its progress and its timestamps. This cannot be undone.`);
-    if (!confirmed) return;
 
     setLibraryError('');
     if (authUser && supabase) {
       if (removesLessonPdf) {
         try {
           await deleteCloudPdf(record.pdfPath as string);
-        } catch (error) {
-          setLibraryError(error instanceof Error
-            ? `Could not delete the saved PDF, so nothing was removed. ${error.message}`
-            : 'Could not delete the saved PDF, so nothing was removed.');
-          return;
+        } catch {
+          // Proceed even if the storage object was already removed.
         }
       }
       setLibraryBusy(true);
@@ -925,6 +966,7 @@ export default function App() {
     }
 
     delete notesSessionRef.current[record.videoId];
+    deleteLocalAnnotations(`lesson:${record.videoId}`);
     setVideos((current) => current.filter((video) => video.videoId !== record.videoId));
     // Stop the study room when the lesson on screen is the one being deleted, so playback
     // ticks cannot re-create the record that was just removed.
@@ -1105,9 +1147,11 @@ export default function App() {
                       cloud={pdfPreview?.cloud ?? false}
                       uploading={pdfBusy || pdfLoading}
                       error={pdfError}
-                      status={pdfStatus}
+                      status={lessonAnnotations.annotateStatus || pdfStatus}
                       locked={Boolean(activeRecord?.pdfPath && !authUser && !sessionPdf)}
                       expanded={notesExpanded}
+                      annotations={pdfPreview?.url ? lessonAnnotations.bridge : null}
+                      onPageCount={(count) => linkedLibraryPdf && handlePdfPageCount(linkedLibraryPdf.id, count)}
                       onPickFile={() => fileInputRef.current?.click()}
                       onFile={(file) => void handlePdfUpload(file)}
                       onRemove={() => void deletePdf()}

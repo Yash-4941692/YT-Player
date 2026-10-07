@@ -84,12 +84,22 @@ export function PdfLibraryPanel({
   const ordered = useMemo(() => {
     const sorted = sortLibrary(items);
     if (!byRecent) return sorted;
-    return [...sorted].sort((a, b) => (activity[b.id]?.lastOpenedAt ?? 0) - (activity[a.id]?.lastOpenedAt ?? 0));
+    return [...sorted].sort((a, b) => {
+      const aOpened = activity[a.id]?.lastOpenedAt ?? 0;
+      const bOpened = activity[b.id]?.lastOpenedAt ?? 0;
+      if (bOpened !== aOpened) return bOpened - aOpened;
+      return b.updatedAt - a.updatedAt;
+    });
   }, [items, byRecent, activity]);
+
   const recentlyOpened = useMemo(
-    () => ordered.filter((item) => activity[item.id]?.lastOpenedAt).slice(0, 5),
-    [ordered, activity],
+    () => [...items]
+      .filter((item) => activity[item.id]?.lastOpenedAt)
+      .sort((a, b) => (activity[b.id]?.lastOpenedAt ?? 0) - (activity[a.id]?.lastOpenedAt ?? 0))
+      .slice(0, 5),
+    [items, activity],
   );
+
   const counts = useMemo(() => {
     const map = new Map<Subject, number>();
     for (const item of ordered) map.set(item.subject, (map.get(item.subject) ?? 0) + 1);
@@ -102,6 +112,27 @@ export function PdfLibraryPanel({
     if (!trimmedQuery) return true;
     return item.name.toLowerCase().includes(trimmedQuery);
   });
+
+  function selectSubjectFilter(nextFilter: 'all' | Subject) {
+    setShowTrash(false);
+    setFilter(nextFilter);
+    if (nextFilter === 'all' && !showTrash && filter === 'all') {
+      setByRecent(false);
+    }
+  }
+
+  function handleRecentClick() {
+    if (showTrash) {
+      setShowTrash(false);
+      setByRecent(true);
+    } else {
+      setByRecent((value) => !value);
+    }
+  }
+
+  function handleTrashClick() {
+    setShowTrash((value) => !value);
+  }
 
   async function handleFiles(files: FileList | null) {
     // Uploading one at a time keeps memory and progress messages predictable for large PDFs.
@@ -182,37 +213,48 @@ export function PdfLibraryPanel({
 
       <div className="pdf-library-toolbar">
         <div className="pdf-library-filters" role="group" aria-label="Filter PDFs by subject">
-          <button className={filter === 'all' ? 'selected' : ''} onClick={() => setFilter('all')}>All <span>{ordered.length}</span></button>
+          <button
+            type="button"
+            className={!showTrash && filter === 'all' && !byRecent ? 'selected' : ''}
+            onClick={() => { setShowTrash(false); setFilter('all'); setByRecent(false); }}
+          >
+            All <span>{ordered.length}</span>
+          </button>
           {subjects.map((subject) => (
-            <button key={subject} className={filter === subject ? 'selected' : ''} onClick={() => setFilter(subject)}>
+            <button
+              key={subject}
+              type="button"
+              className={!showTrash && filter === subject ? 'selected' : ''}
+              onClick={() => selectSubjectFilter(subject)}
+            >
               {subject} <span>{counts.get(subject) ?? 0}</span>
             </button>
           ))}
         </div>
 
         <div className="pdf-library-tools">
-          {ordered.length > 3 && (
+          {ordered.length > 1 && !showTrash && (
             <label className="pdf-library-search">
               <Search size={14} />
               <span className="sr-only">Search your PDFs</span>
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search PDFs" />
             </label>
           )}
-          {ordered.length > 1 && (
-            <button
-              type="button"
-              className={`pdf-library-sort ${byRecent ? 'selected' : ''}`}
-              onClick={() => setByRecent((value) => !value)}
-              title="Sort by the PDF you opened most recently"
-            >
-              <Clock size={13} /> Recently opened
-            </button>
-          )}
+          <button
+            type="button"
+            className={`pdf-library-sort ${!showTrash && byRecent ? 'selected' : ''}`}
+            onClick={handleRecentClick}
+            title="View PDFs sorted by most recently opened"
+            aria-pressed={!showTrash && byRecent}
+          >
+            <Clock size={13} /> Recently opened {recentlyOpened.length > 0 && <span>{recentlyOpened.length}</span>}
+          </button>
           <button
             type="button"
             className={`pdf-library-sort pdf-library-trash-toggle ${showTrash ? 'selected' : ''}`}
-            onClick={() => setShowTrash((value) => !value)}
+            onClick={handleTrashClick}
             title="PDFs you deleted in the last 30 days"
+            aria-pressed={showTrash}
           >
             <Trash2 size={13} /> Recently deleted {deletedItems.length > 0 && <span>{deletedItems.length}</span>}
           </button>
@@ -251,12 +293,19 @@ export function PdfLibraryPanel({
                 <span className="pdf-library-empty-icon"><Trash2 size={20} /></span>
                 <strong>Nothing in Recently deleted</strong>
                 <p>PDFs you delete from the library wait here for {TRASH_RETENTION_DAYS} days, so one tap brings them back.</p>
+                <button
+                  type="button"
+                  className="button-outline small-outline"
+                  onClick={() => setShowTrash(false)}
+                >
+                  Back to PDF library
+                </button>
               </div>
             ) : (
               <>
                 <p className="pdf-trash-note">
                   <RotateCcw size={13} /> Deleted PDFs stay here for {TRASH_RETENTION_DAYS} days. Restore brings one straight back; “Delete forever” erases its file from storage.
-                  {trashUnavailable && ' Cloud trash is unavailable until the newest database migration is run — see the setup guide.'}
+                  {trashUnavailable && ' Saved locally on this device until the optional cloud trash migration is run.'}
                 </p>
                 <div className="pdf-library-grid">
                   {deletedItems.map((item) => (
@@ -386,13 +435,13 @@ function PdfCard({ item, attached, canAttach, pageCount, lastOpenedAt, onOpen, o
             </select>
           </label>
           <div className="pdf-library-edit-actions">
-            <button className="pdf-library-save" onClick={save}><Check size={13} /> Save</button>
-            <button className="pdf-library-cancel" onClick={() => setEditing(false)}><X size={13} /> Cancel</button>
+            <button type="button" className="pdf-library-save" onClick={save}><Check size={13} /> Save</button>
+            <button type="button" className="pdf-library-cancel" onClick={() => setEditing(false)}><X size={13} /> Cancel</button>
           </div>
         </div>
       ) : (
         <>
-          <button className="pdf-library-open" onClick={onOpen} title={`Open ${item.name}`}>
+          <button type="button" className="pdf-library-open" onClick={onOpen} title={`Open ${item.name}`}>
             <span className="pdf-library-file-icon"><FileText size={17} /></span>
             <span className="pdf-library-name">{pdfTitle(item.name)}</span>
           </button>
@@ -414,6 +463,7 @@ function PdfCard({ item, attached, canAttach, pageCount, lastOpenedAt, onOpen, o
             <span className="pdf-library-card-actions">
               {canAttach && (
                 <button
+                  type="button"
                   className={`pdf-library-action ${attached ? 'is-attached' : ''}`}
                   onClick={onAttach}
                   title={attached ? 'Already open beside this lesson' : 'Open beside the current lesson'}
@@ -422,9 +472,9 @@ function PdfCard({ item, attached, canAttach, pageCount, lastOpenedAt, onOpen, o
                   {attached ? <Check size={14} /> : <Link2 size={14} />}
                 </button>
               )}
-              <button className="pdf-library-action" onClick={onDownload} title="Download" aria-label={`Download ${item.name}`}><Download size={14} /></button>
-              <button className="pdf-library-action" onClick={startEditing} title="Rename" aria-label={`Rename ${item.name}`}><Pencil size={14} /></button>
-              <button className="pdf-library-action is-danger" onClick={onDelete} title="Delete" aria-label={`Delete ${item.name}`}><Trash2 size={14} /></button>
+              <button type="button" className="pdf-library-action" onClick={onDownload} title="Download" aria-label={`Download ${item.name}`}><Download size={14} /></button>
+              <button type="button" className="pdf-library-action" onClick={startEditing} title="Rename" aria-label={`Rename ${item.name}`}><Pencil size={14} /></button>
+              <button type="button" className="pdf-library-action is-danger" onClick={onDelete} title="Delete" aria-label={`Delete ${item.name}`}><Trash2 size={14} /></button>
             </span>
           </div>
         </>
