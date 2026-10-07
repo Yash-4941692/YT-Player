@@ -86,7 +86,7 @@ export function AuthModal({ open, onClose }: Props) {
               <li>Enable Google under Supabase Authentication providers.</li>
               <li>Add the Supabase URL and publishable key in Vercel, then redeploy.</li>
             </ol>
-            <a href="https://github.com/Yash-4941692/YT-Player/blob/arena/01a1050c-yt-player/README.md#optional-accounts-and-cross-device-sync" target="_blank" rel="noreferrer">Open the step-by-step setup guide <ArrowUpRight size={14} /></a>
+            <a href="https://github.com/Yash-4941692/YT-Player/blob/main/README.md#optional-one-click-google-sign-in-and-cloud-sync" target="_blank" rel="noreferrer">Open the step-by-step setup guide <ArrowUpRight size={14} /></a>
           </div>
         ) : (
           <>
