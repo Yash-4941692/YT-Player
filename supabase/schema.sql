@@ -1,8 +1,12 @@
 -- Focusframe JEE study player: run this once in Supabase SQL Editor.
--- Legacy columns (kept so existing projects keep working): is_revision and bookmarks are no
--- longer written by the app, and the study_state table is unused. They can be dropped later.
--- The app reads/writes watch_items (lessons, progress, chapters, PDF pointers), pdf_library
--- (the personal, cross-device PDF shelf) and the private video-notes bucket.
+-- Legacy columns (kept on purpose for projects created before this version):
+-- watch_items.is_revision and watch_items.bookmarks are no longer read or written by the
+-- app. The app reads/writes watch_items (lessons, progress, chapters, PDF pointers),
+-- pdf_library (the personal, cross-device PDF shelf), pdf_annotations (annotations drawn
+-- on library PDFs) and the private video-notes bucket.
+-- Existing projects that want those unused columns gone can opt in by running
+-- supabase/migrations/004_optional_drop_legacy.sql — that file is never run automatically
+-- and is not needed for the app to work.
 -- Never put a Supabase service_role key in the browser or in Vercel's VITE_* variables.
 
 create table if not exists public.watch_items (
@@ -46,27 +50,9 @@ drop policy if exists "Users delete their own watch items" on public.watch_items
 create policy "Users delete their own watch items" on public.watch_items
   for delete to authenticated using (auth.uid() = user_id);
 
-create table if not exists public.study_state (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
-);
-
-alter table public.study_state enable row level security;
-grant select, insert, update, delete on public.study_state to authenticated;
-
-drop policy if exists "Users read their own study state" on public.study_state;
-create policy "Users read their own study state" on public.study_state
-  for select to authenticated using (auth.uid() = user_id);
-
-drop policy if exists "Users insert their own study state" on public.study_state;
-create policy "Users insert their own study state" on public.study_state
-  for insert to authenticated with check (auth.uid() = user_id);
-
-drop policy if exists "Users update their own study state" on public.study_state;
-create policy "Users update their own study state" on public.study_state
-  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
-
+-- The whole study_state table (and the is_revision / bookmarks columns above) is unused by
+-- the app. New projects do not create it at all; older projects can drop it with the
+-- optional migration supabase/migrations/004_optional_drop_legacy.sql.
 -- PDF library: PDFs that belong to the account rather than to one lesson.
 -- Files are stored in the same private `video-notes` bucket under `<user id>/library/`.
 create table if not exists public.pdf_library (
