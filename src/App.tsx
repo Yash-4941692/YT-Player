@@ -110,6 +110,11 @@ export default function App() {
   const playlistIdRef = useRef<string | undefined>(undefined);
   const loadTokenRef = useRef(0);
   const lastProgressSaveRef = useRef(-1);
+  // Cloud sync bookkeeping: the updatedAt we last pushed for each lesson, so a progress
+  // tick only re-uploads the one lesson that changed instead of the whole library.
+  const lastSyncedRef = useRef(new Map<string, number>());
+  // Set right after the cloud library loads so the first push after a merge is a full one.
+  const fullReconcileRef = useRef(false);
   const videosRef = useRef(videos);
   videosRef.current = videos;
 
@@ -173,12 +178,17 @@ export default function App() {
     if (!cloudConfigured || !authReady || !authUser) {
       setSyncedUserId(null);
       setSyncStatus('local');
+      lastSyncedRef.current = new Map();
+      fullReconcileRef.current = false;
       return;
     }
     let cancelled = false;
     setSyncedUserId(null);
     setSyncStatus('syncing');
     setSyncMessage('Loading your study library…');
+    // The merge below is the one place that reconciles local and cloud copies.
+    lastSyncedRef.current = new Map();
+    fullReconcileRef.current = true;
     (async () => {
       try {
         const remoteVideos = await fetchCloudVideos(authUser.id);
@@ -259,12 +269,37 @@ export default function App() {
     })();
   }, [authUser?.id, libraryLoadedFor, libraryPdfs, showToast]);
 
+  // Push local changes to the account. Only lessons whose updatedAt differs from the last
+  // successful push are uploaded, plus one full pass right after the cloud list is merged.
   useEffect(() => {
     if (!supabase || !authUser || syncedUserId !== authUser.id) return;
+    const fullReconcile = fullReconcileRef.current;
+    if (fullReconcile && videos.length === 0) {
+      fullReconcileRef.current = false;
+      return;
+    }
+    const pending = videos.filter((video) => fullReconcile || lastSyncedRef.current.get(video.videoId) !== video.updatedAt);
+    if (pending.length === 0) return;
+    const userId = authUser.id;
     const timeout = window.setTimeout(async () => {
       setSyncStatus('syncing');
       try {
-        await Promise.all(videos.map((video) => saveCloudVideo(authUser.id, video)));
+        // Writes stay independent: one failing lesson must not block the others.
+        const results = await Promise.allSettled(pending.map(async (video) => {
+          await saveCloudVideo(userId, video);
+          return video;
+        }));
+        const failed: VideoRecord[] = [];
+        results.forEach((result, index) => {
+          const video = pending[index];
+          if (result.status === 'fulfilled') lastSyncedRef.current.set(video.videoId, video.updatedAt);
+          else failed.push(video);
+        });
+        if (failed.length > 0) {
+          const reason = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
+          throw reason?.reason instanceof Error ? reason.reason : new Error(`Could not sync ${failed.length} lesson${failed.length === 1 ? '' : 's'}.`);
+        }
+        fullReconcileRef.current = false;
         setSyncStatus('synced');
         setSyncMessage('Your study library is synced.');
       } catch (error) {
