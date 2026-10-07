@@ -1,0 +1,8 @@
+# Focusframe — JEE Study Player
+# The site is a single-page app; every route is served by index.html.
+User-agent: *
+Allow: /
+
+# Nothing here is private data: lessons and PDFs live behind the sign-in wall
+# and in the user's own browser, so there is nothing to hide from crawlers.
+Sitemap: https://yt-player-yash4941692-9255s-projects.vercel.app/sitemap.xml
