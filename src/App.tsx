@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import type { User } from '@supabase/supabase-js';
 import {
-  ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff, FileText, Film,
-  HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
+  Archive, ArchiveRestore, ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff,
+  FileText, Film, HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
@@ -11,8 +11,8 @@ import { PdfLibraryViewer } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
-  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteLibraryPdf,
-  fetchCloudVideos, fetchLibraryPdfs, isLibraryPath, saveCloudVideo, supabase,
+  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteCloudVideo,
+  deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, isLibraryPath, saveCloudVideo, supabase,
   updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
 import { loadLocalState, saveLocalState, upsertVideo } from './lib/storage';
@@ -90,7 +90,7 @@ export default function App() {
   const [pdfPreview, setPdfPreview] = useState<PdfPreview | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [notesVersion, setNotesRevision] = useState(0);
-  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject>('all');
+  const [libraryFilter, setLibraryFilter] = useState<'all' | Subject | 'removed'>('all');
 
   const [libraryPdfs, setLibraryPdfs] = useState<LibraryPdf[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
@@ -752,8 +752,76 @@ export default function App() {
   }
 
   const libraryVideos = videos.filter((video) => !video.archived);
-  const filteredLibrary = libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
+  const removedVideos = videos.filter((video) => video.archived);
+  const showingRemoved = libraryFilter === 'removed';
+  const filteredLibrary = showingRemoved ? [] : libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
   const availableSubjects = subjects.filter((subject) => libraryVideos.some((video) => video.subject === subject));
+  const libraryVisible = libraryVideos.length > 0 || removedVideos.length > 0 || showingRemoved;
+
+  /** A PDF is "linked from the library" when it lives under the library prefix or a library row points at it. */
+  function pdfLinkedFromLibrary(path?: string): boolean {
+    if (!path) return false;
+    if (isLibraryPath(path)) return true;
+    return libraryPdfs.some((item) => Boolean(item.storagePath) && item.storagePath === path);
+  }
+
+  function restoreVideo(record: VideoRecord) {
+    updateVideo(record.videoId, { archived: false });
+    if (removedVideos.length <= 1) setLibraryFilter('all');
+    showToast('Lesson restored to your library.');
+  }
+
+  /**
+   * Remove a lesson and its data for good. The lesson PDF is deleted from storage too —
+   * except when that same file is linked from the PDF library, which is never touched.
+   */
+  async function deleteVideoForever(record: VideoRecord) {
+    const keepLibraryPdf = pdfLinkedFromLibrary(record.pdfPath);
+    const removesLessonPdf = Boolean(record.pdfPath) && !keepLibraryPdf;
+    const fileNote = removesLessonPdf
+      ? '\n\nIts saved PDF will also be deleted from your storage.'
+      : keepLibraryPdf
+        ? '\n\nIts PDF is part of your PDF library, so that file is kept.'
+        : '';
+    const confirmed = window.confirm(`Delete “${record.title}” forever?${fileNote}\n\nThis removes the lesson, its progress and its timestamps. This cannot be undone.`);
+    if (!confirmed) return;
+
+    setLibraryError('');
+    if (authUser && supabase) {
+      if (removesLessonPdf) {
+        try {
+          await deleteCloudPdf(record.pdfPath as string);
+        } catch (error) {
+          setLibraryError(error instanceof Error
+            ? `Could not delete the saved PDF, so nothing was removed. ${error.message}`
+            : 'Could not delete the saved PDF, so nothing was removed.');
+          return;
+        }
+      }
+      setLibraryBusy(true);
+      try {
+        await deleteCloudVideo(authUser.id, record.videoId);
+      } catch (error) {
+        setLibraryBusy(false);
+        setLibraryError(error instanceof Error ? error.message : 'Could not delete this lesson from your account.');
+        return;
+      }
+      setLibraryBusy(false);
+    }
+
+    delete notesSessionRef.current[record.videoId];
+    setVideos((current) => current.filter((video) => video.videoId !== record.videoId));
+    // Stop the study room when the lesson on screen is the one being deleted, so playback
+    // ticks cannot re-create the record that was just removed.
+    if (activeVideoId === record.videoId) {
+      setSource(null);
+      setActiveVideoId(null);
+      setPdfPreview(null);
+      setNotesRevision((value) => value + 1);
+    }
+    if (removedVideos.length <= 1) setLibraryFilter('all');
+    showToast('Lesson deleted forever.');
+  }
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
@@ -982,25 +1050,50 @@ export default function App() {
             onSignIn={() => setAuthOpen(true)}
           />
 
-          {libraryVideos.length > 0 && (
+          {libraryVisible && (
             <section className="library-section">
               <div className="library-heading">
                 <div>
-                  <p className="eyebrow">YOUR LIBRARY</p>
-                  <h2>Pick up where you left off</h2>
-                  <p>Timestamps, notes and progress stay with every lesson.</p>
+                  <p className="eyebrow">{showingRemoved ? 'REMOVED LESSONS' : 'YOUR LIBRARY'}</p>
+                  <h2>{showingRemoved ? 'Removed, not gone' : 'Pick up where you left off'}</h2>
+                  <p>{showingRemoved
+                    ? 'Removed lessons stay out of your library until you restore them or delete them forever.'
+                    : 'Timestamps, notes and progress stay with every lesson.'}</p>
                 </div>
-                <span className="library-count"><span>{libraryVideos.length.toString().padStart(2, '0')}</span> SAVED</span>
+                <span className="library-count"><span>{(showingRemoved ? removedVideos.length : libraryVideos.length).toString().padStart(2, '0')}</span> {showingRemoved ? 'REMOVED' : 'SAVED'}</span>
               </div>
               <div className="library-filters">
                 <button className={libraryFilter === 'all' ? 'selected' : ''} onClick={() => setLibraryFilter('all')}>All lessons <span>{libraryVideos.length}</span></button>
                 {availableSubjects.map((subject) => <button key={subject} className={libraryFilter === subject ? 'selected' : ''} onClick={() => setLibraryFilter(subject)}>{subject} <span>{libraryVideos.filter((video) => video.subject === subject).length}</span></button>)}
+                {removedVideos.length > 0 && (
+                  <button className={`library-filter-removed ${showingRemoved ? 'selected' : ''}`} onClick={() => setLibraryFilter(showingRemoved ? 'all' : 'removed')}>
+                    <Archive size={13} /> Removed <span>{removedVideos.length}</span>
+                  </button>
+                )}
               </div>
+              {showingRemoved && (
+                <p className="library-removed-note">
+                  <Info size={13} /> “Delete forever” also erases that lesson’s saved PDF from storage. A PDF that lives in your PDF library above is never deleted.
+                </p>
+              )}
               <div className="library-grid">
-                {filteredLibrary.map((video) => (
-                  <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
-                ))}
-                {filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
+                {showingRemoved
+                  ? removedVideos.map((video) => (
+                      <LibraryCard
+                        key={video.videoId}
+                        video={video}
+                        removed
+                        active={video.videoId === activeVideoId}
+                        onResume={() => resumeVideo(video)}
+                        onRestore={() => restoreVideo(video)}
+                        onDeleteForever={() => void deleteVideoForever(video)}
+                      />
+                    ))
+                  : filteredLibrary.map((video) => (
+                      <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
+                    ))}
+                {!showingRemoved && filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
+                {showingRemoved && removedVideos.length === 0 && <div className="library-empty">Nothing has been removed.</div>}
               </div>
             </section>
           )}
@@ -1028,10 +1121,21 @@ export default function App() {
   );
 }
 
-function LibraryCard({ video, active, onResume, onRemove }: { video: VideoRecord; active: boolean; onResume: () => void; onRemove: () => void }) {
+interface LibraryCardProps {
+  video: VideoRecord;
+  active: boolean;
+  /** Removed (archived) lessons show Restore + Delete forever instead of Remove. */
+  removed?: boolean;
+  onResume: () => void;
+  onRemove?: () => void;
+  onRestore?: () => void;
+  onDeleteForever?: () => void;
+}
+
+function LibraryCard({ video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever }: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
   return (
-    <article className={`library-card glass-card ${active ? 'library-card-active' : ''}`}>
+    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''}`}>
       <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}>
         <img src={video.thumbnail} alt="" loading="lazy" />
         <span className="library-play"><Play size={14} fill="currentColor" /></span>
@@ -1043,13 +1147,22 @@ function LibraryCard({ video, active, onResume, onRemove }: { video: VideoRecord
           <span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span>
           <span className="library-card-tools">
             {video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
-            <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
+            {!removed && (
+              <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
+            )}
           </span>
         </div>
         <button className="library-video-title" onClick={onResume}>{video.title}</button>
         <p>{video.channel || 'YouTube lesson'}</p>
         <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-        <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+        {removed ? (
+          <div className="library-removed-actions">
+            <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
+            <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
+          </div>
+        ) : (
+          <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+        )}
       </div>
     </article>
   );

@@ -87,6 +87,16 @@ export async function saveCloudVideo(userId: string, record: VideoRecord): Promi
   if (error) throw error;
 }
 
+/**
+ * Delete one lesson row from the account. Used by "Delete forever" in the removed
+ * section of the library — "Remove" only archives a lesson and never calls this.
+ */
+export async function deleteCloudVideo(userId: string, videoId: string): Promise<void> {
+  if (!supabase) return;
+  const { error } = await supabase.from('watch_items').delete().eq('user_id', userId).eq('video_id', videoId);
+  if (error) throw error;
+}
+
 export async function uploadCloudPdf(userId: string, videoId: string, file: File, previousPath?: string): Promise<string> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-90) || 'notes.pdf';
