@@ -647,3 +647,15 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- Error boundary ---------- */
+.error-screen { min-height: 100vh; display: grid; place-items: center; padding: 26px 18px; background: radial-gradient(ellipse 60% 45% at 50% 0%, rgba(255,145,120,.08), transparent 70%), #08090f; }
+.error-screen-card { width: min(560px, 100%); padding: 30px 28px; border-radius: 16px; text-align: center; }
+.error-screen-mark { width: 46px; height: 46px; display: grid; place-items: center; margin: 0 auto 14px; color: #ffb8a6; border: 1px solid rgba(255,145,120,.24); border-radius: 13px; background: rgba(255,145,120,.09); font: 700 22px var(--display); }
+.error-screen-card h1 { margin: 6px 0 10px; font-family: var(--display); font-size: 25px; letter-spacing: -.03em; }
+.error-screen-copy { max-width: 420px; margin: 0 auto 20px; color: #a9a6b3; font-size: 13px; line-height: 1.7; }
+.error-screen-actions { display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap; }
+.error-screen-details { margin-top: 20px; text-align: left; }
+.error-screen-details summary { display: inline-flex; align-items: center; gap: 6px; color: #8f8d9a; font-size: 11px; cursor: pointer; }
+.error-screen-details pre { margin: 9px 0 0; padding: 11px 12px; overflow: auto; max-height: 160px; color: #cfcbd8; border: 1px solid var(--line); border-radius: 9px; background: rgba(5,5,10,.55); font: 11px var(--mono); white-space: pre-wrap; }
+.error-screen-hint { margin: 18px 0 0; color: #7c7a88; font-size: 11px; line-height: 1.65; }
