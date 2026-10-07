@@ -259,6 +259,17 @@ export function PdfViewer({
     }
   }, []);
 
+  /** Make sure every visible page has its text layer, independent of canvas rendering. */
+  const ensureTextLayers = useCallback(() => {
+    const doc = docRef.current;
+    if (!doc) return;
+    visibleRef.current.forEach((pageNumber) => {
+      if (!textLayerDivsRef.current.has(pageNumber)) return;
+      if (textLayersRef.current.has(pageNumber)) return;
+      void renderTextLayer(pageNumber, doc);
+    });
+  }, [renderTextLayer]);
+
   const dropTextLayer = useCallback((pageNumber: number) => {
     const layer = textLayersRef.current.get(pageNumber);
     if (layer) {
@@ -340,9 +351,12 @@ export function PdfViewer({
   useEffect(() => {
     if (!annotationMode || viewerStatus !== 'ready') return;
     textLayerPagesRef.current.forEach((pageNumber) => dropTextLayer(pageNumber));
-    const frame = window.requestAnimationFrame(() => { void renderVisiblePages(); });
+    const frame = window.requestAnimationFrame(() => {
+      void renderVisiblePages();
+      ensureTextLayers();
+    });
     return () => window.cancelAnimationFrame(frame);
-  }, [annotationMode, zoom, layoutWidth, viewerStatus, dropTextLayer, renderVisiblePages]);
+  }, [annotationMode, zoom, layoutWidth, viewerStatus, dropTextLayer, renderVisiblePages, ensureTextLayers]);
 
   // Leaving annotation mode (or opening another PDF) removes every text layer again.
   useEffect(() => {
