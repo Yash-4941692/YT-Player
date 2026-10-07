@@ -2,13 +2,15 @@
 
 A responsive YouTube study desk for JEE One Shots: native YouTube playback with your timestamp chapters and PDF notes open side by side. The PDF viewer renders pages on canvas, so notes are readable inline on phones and desktop (no download prompt), and the whole app is built around one screen — video on one side, notes on the other, your library below.
 
+**PDF library:** signed-in users can upload PDFs to a personal shelf that is not tied to any one lesson. Every PDF is private to the account, can be renamed, tagged by subject, read full screen, downloaded, or attached to the lesson on screen — and it appears on every device they sign in from.
+
 ## Fastest way to try it (no keys or accounts)
 
 1. In Vercel, choose **Add New → Project** and import `Yash-4941692/YT-Player`.
 2. Use build command `npm run build` and output directory `dist`. Vercel usually detects Vite automatically. You do **not** need environment variables for guest mode.
 3. Click **Deploy**. On the deployed URL, paste a YouTube link and open your study room.
 
-Guest mode saves your lessons, progress and timestamps in that browser. Guest PDF files stay in memory only while the page is open. Guest data is not shared between devices.
+Guest mode saves your lessons, progress and timestamps in that browser. Guest PDF files stay in memory only while the page is open, so the PDF library works for guests too but is not shared between devices. Signing in moves the PDFs uploaded in that tab into the account so they start syncing.
 
 ## Optional: one-click Google sign-in and cloud sync
 
@@ -18,7 +20,9 @@ The app now has a **Continue with Google** button. A new user is created automat
 
 1. Create a project at [supabase.com](https://supabase.com/). Keep the project URL and database password private.
 2. Open the project's **SQL Editor → New query**.
-3. Open [`supabase/schema.sql`](./supabase/schema.sql), copy the whole file into the query, and press **Run**. It creates the private watch/study tables, access policies, and private PDF bucket.
+3. Open [`supabase/schema.sql`](./supabase/schema.sql), copy the whole file into the query, and press **Run**. It creates the private watch/study tables, the PDF library table, access policies, and the private PDF bucket.
+
+   **Already set up an earlier version?** Run [`supabase/migrations/002_pdf_library.sql`](./supabase/migrations/002_pdf_library.sql) once instead — it only adds the new `pdf_library` table and its policies, and leaves every existing lesson, timestamp and PDF untouched. (Re-running the full `schema.sql` is also safe; it is written to be repeatable.)
 
 ### 2. Create Google OAuth credentials (one time for this website)
 
@@ -55,6 +59,15 @@ Apply the variables to **Production** (and Preview/Development if you need those
 
 Open your deployed Focusframe site, click **Sync across devices → Continue with Google**, and pick an account. First-time users are signed up automatically. Their lessons, progress, timestamp chapters and uploaded PDFs then sync through their account. PDFs are private and opened with short-lived links.
 
+## PDF library
+
+- Upload one or more PDFs (drag and drop or **Upload PDF**), up to 100 MB each.
+- Each PDF gets a name and a Physics / Chemistry / Mathematics / Other tag; both can be edited later.
+- **Open** reads it full screen with the same canvas viewer used beside the video; **Download** saves a copy.
+- **Attach** (the link icon, shown while a lesson is open) links a library PDF to that lesson so it opens beside the video. Detaching a PDF from a lesson never deletes it from the library.
+- Files are stored in the existing private `video-notes` bucket under `<user id>/library/…`, so no second bucket is needed.
+- Guests can upload and read PDFs for the current tab only; signing in automatically moves them to the account.
+
 The site and guest mode can be hosted without charge within the current Vercel free plan limits. Supabase and Google have their own free-tier/usage limits, which can change. The app accepts PDFs up to 100 MB, but your Supabase project's upload limit may be lower.
 
 ## Local development
@@ -68,5 +81,5 @@ npm run dev
 
 - YouTube videos are embedded/streamed by YouTube; the app does not download or host videos. Some owners disable embedding, in which case the player offers a link to open the video on YouTube.
 - Keyboard shortcuts (when not typing): **Space** play/pause, **← / →** seek 10 seconds, **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions.
-- There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library.
+- There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library (`watch_items` for lesson notes, `pdf_library` for the PDF library).
 - PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, loaded only when a notes panel is opened. Pages render lazily, so large PDFs stay smooth on phones.

@@ -1,8 +1,8 @@
 -- Focusframe JEE study player: run this once in Supabase SQL Editor.
 -- Legacy columns (kept so existing projects keep working): is_revision and bookmarks are no
 -- longer written by the app, and the study_state table is unused. They can be dropped later.
--- The app only reads/writes watch_items (lessons, progress, chapters, PDF pointers) and the
--- private video-notes bucket.
+-- The app reads/writes watch_items (lessons, progress, chapters, PDF pointers), pdf_library
+-- (the personal, cross-device PDF shelf) and the private video-notes bucket.
 -- Never put a Supabase service_role key in the browser or in Vercel's VITE_* variables.
 
 create table if not exists public.watch_items (
@@ -66,6 +66,41 @@ create policy "Users insert their own study state" on public.study_state
 drop policy if exists "Users update their own study state" on public.study_state;
 create policy "Users update their own study state" on public.study_state
   for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- PDF library: PDFs that belong to the account rather than to one lesson.
+-- Files are stored in the same private `video-notes` bucket under `<user id>/library/`.
+create table if not exists public.pdf_library (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null default 'notes.pdf',
+  subject text not null default 'Other' check (subject in ('Physics', 'Chemistry', 'Mathematics', 'Other')),
+  size bigint not null default 0,
+  storage_path text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists pdf_library_user_updated_idx
+  on public.pdf_library (user_id, updated_at desc);
+
+alter table public.pdf_library enable row level security;
+grant select, insert, update, delete on public.pdf_library to authenticated;
+
+drop policy if exists "Users read their own library PDFs" on public.pdf_library;
+create policy "Users read their own library PDFs" on public.pdf_library
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "Users add their own library PDFs" on public.pdf_library;
+create policy "Users add their own library PDFs" on public.pdf_library
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "Users update their own library PDFs" on public.pdf_library;
+create policy "Users update their own library PDFs" on public.pdf_library
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users delete their own library PDFs" on public.pdf_library;
+create policy "Users delete their own library PDFs" on public.pdf_library
+  for delete to authenticated using (auth.uid() = user_id);
 
 -- Private bucket for per-video notes. The app enforces a 100 MB client-side cap;
 -- Supabase's project/plan upload limits may be lower and can reject larger files.

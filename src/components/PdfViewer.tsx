@@ -43,6 +43,8 @@ export interface PdfViewerProps {
   status: string;
   locked: boolean;
   expanded: boolean;
+  /** Hide the "replace file" action (used when the PDF belongs to the library). */
+  allowReplace?: boolean;
   onPickFile: () => void;
   onFile: (file: File) => void;
   onRemove: () => void;
@@ -52,7 +54,7 @@ export interface PdfViewerProps {
 }
 
 export function PdfViewer({
-  url, name, size, cloud, uploading, error, status, locked, expanded,
+  url, name, size, cloud, uploading, error, status, locked, expanded, allowReplace = true,
   onPickFile, onFile, onRemove, onDownload, onSignIn, onToggleExpand,
 }: PdfViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -322,7 +324,7 @@ export function PdfViewer({
           <div className="pdf-control-group">
             {url && <button type="button" onClick={onDownload} aria-label="Download notes" title="Download"><ArrowDownToLine size={16} /></button>}
             {url && <a href={url} target="_blank" rel="noreferrer" aria-label="Open notes in a new tab" title="Open in a new tab"><ExternalLink size={16} /></a>}
-            {url && <button type="button" onClick={onPickFile} aria-label="Replace notes" title="Replace PDF"><Upload size={16} /></button>}
+            {url && allowReplace && <button type="button" onClick={onPickFile} aria-label="Replace notes" title="Replace PDF"><Upload size={16} /></button>}
             {url && <button type="button" className="pdf-remove" onClick={onRemove} aria-label="Remove notes" title="Remove"><Trash2 size={16} /></button>}
             <button type="button" onClick={onToggleExpand} aria-label={expanded ? 'Exit full screen notes' : 'Expand notes'} title={expanded ? 'Exit full screen' : 'Full screen notes'}>{expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           </div>
@@ -353,7 +355,7 @@ export function PdfViewer({
               <div className="pdf-empty-icon"><Info size={22} /></div>
               <strong>This PDF could not be opened</strong>
               <p>{loadError || 'Try replacing the file with a fresh copy.'}</p>
-              <button className="button-outline" onClick={onPickFile}><Upload size={15} /> Replace PDF</button>
+              {allowReplace && <button className="button-outline" onClick={onPickFile}><Upload size={15} /> Replace PDF</button>}
               <a className="pdf-fallback-link" href={url} target="_blank" rel="noreferrer">Open in a new tab <ExternalLink size={13} /></a>
             </div>
           )}
