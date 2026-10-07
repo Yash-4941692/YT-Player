@@ -660,12 +660,16 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 .error-screen-details pre { margin: 9px 0 0; padding: 11px 12px; overflow: auto; max-height: 160px; color: #cfcbd8; border: 1px solid var(--line); border-radius: 9px; background: rgba(5,5,10,.55); font: 11px var(--mono); white-space: pre-wrap; }
 .error-screen-hint { margin: 18px 0 0; color: #7c7a88; font-size: 11px; line-height: 1.65; }
 
-/* ---------- PDF annotation editor (library reader only — opt-in via props) ---------- */
+/* ---------- PDF annotation editor (library reader & study room) ---------- */
 .pdf-annotate-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(20,18,32,.72); }
-.pdf-annotate-tools, .pdf-annotate-colors, .pdf-annotate-actions { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid rgba(255,255,255,.075); border-radius: 10px; background: rgba(255,255,255,.03); }
-.pdf-annotate-tool, .pdf-annotate-action { width: 32px; height: 32px; display: grid; place-items: center; color: #cbc8d6; border: 0; border-radius: 8px; background: transparent; }
-.pdf-annotate-tool:hover, .pdf-annotate-action:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.09); }
-.pdf-annotate-tool.is-active { color: #0f1116; background: linear-gradient(140deg, #cdbaff, #a98cff); }
+.pdf-annotate-tools, .pdf-annotate-colors, .pdf-annotate-widths, .pdf-annotate-actions { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid rgba(255,255,255,.075); border-radius: 10px; background: rgba(255,255,255,.03); }
+.pdf-annotate-tool, .pdf-annotate-action, .pdf-annotate-width-btn { width: 32px; height: 32px; display: grid; place-items: center; color: #cbc8d6; border: 0; border-radius: 8px; background: transparent; }
+.pdf-annotate-tool:hover, .pdf-annotate-action:hover:not(:disabled), .pdf-annotate-width-btn:hover { color: #fff; background: rgba(255,255,255,.09); }
+.pdf-annotate-tool.is-active, .pdf-annotate-width-btn.is-active { color: #0f1116; background: linear-gradient(140deg, #cdbaff, #a98cff); }
+.pdf-annotate-width-dot { display: block; border-radius: 50%; background: currentColor; }
+.pdf-annotate-width-slider-wrap { display: inline-flex; align-items: center; gap: 6px; padding: 0 7px 0 4px; }
+.pdf-annotate-width-slider { width: 64px; height: 4px; accent-color: #bba1ff; cursor: pointer; }
+.pdf-annotate-width-value { min-width: 28px; color: #cbc8d6; font: 10px var(--mono); text-align: right; white-space: nowrap; }
 .pdf-annotate-action:disabled { opacity: .3; cursor: not-allowed !important; }
 .pdf-annotate-action.is-danger:hover { color: #ffb2a1; background: rgba(255,145,120,.12); }
 .pdf-annotate-color { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(0,0,0,.35); border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,.14); }

@@ -119,9 +119,11 @@ export async function createPdfSignedUrl(path: string): Promise<string> {
 }
 
 export async function deleteCloudPdf(path: string): Promise<void> {
-  if (!supabase) return;
+  if (!supabase || !path) return;
   const { error } = await supabase.storage.from('video-notes').remove([path]);
-  if (error) throw error;
+  if (error && !/not found|404|no such|invalid/i.test(error.message)) {
+    console.warn('Could not remove cloud PDF object from storage:', error.message);
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -230,9 +232,18 @@ export async function updateLibraryPdf(
 
 export async function deleteLibraryPdf(userId: string, item: LibraryPdf): Promise<void> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  const { error: removeError } = await supabase.storage.from('video-notes').remove([item.storagePath]);
-  // A missing file should never block clearing the entry from the library.
-  if (removeError && !/not found|404/i.test(removeError.message)) throw removeError;
+  if (item.storagePath) {
+    const { error: removeError } = await supabase.storage.from('video-notes').remove([item.storagePath]);
+    // A missing file or storage policy hiccup should never block clearing the entry from the library.
+    if (removeError && !/not found|404|no such|invalid/i.test(removeError.message)) {
+      console.warn('Could not remove library PDF object from storage:', removeError.message);
+    }
+  }
+  await Promise.allSettled([
+    supabase.from('pdf_trash').delete().eq('pdf_id', item.id).eq('user_id', userId),
+    supabase.from('pdf_activity').delete().eq('pdf_id', item.id).eq('user_id', userId),
+    supabase.from('pdf_annotations').delete().eq('pdf_id', item.id).eq('user_id', userId),
+  ]);
   const { error } = await supabase.from('pdf_library').delete().eq('id', item.id).eq('user_id', userId);
   if (error) throw error;
 }
