@@ -54,6 +54,39 @@ for (const key of [
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+/**
+ * The browser always has a WebSocket; Node 20 (which CI runs) does not, and the reader treats
+ * live updates as optional (it re-reads the account copy on focus). Give the simulated device a
+ * socket that reports a failed connection instead of throwing, so the sync itself is still
+ * exercised. `SIM_NO_WEBSOCKET=1` reproduces the same situation on a newer Node.
+ */
+if (process.env.SIM_NO_WEBSOCKET === '1') delete (globalThis as unknown as { WebSocket?: unknown }).WebSocket;
+if (typeof globalThis.WebSocket !== 'function') {
+  class UnavailableWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = 3;
+    url = '';
+    onopen: ((event: unknown) => void) | null = null;
+    onmessage: ((event: unknown) => void) | null = null;
+    onerror: ((event: unknown) => void) | null = null;
+    onclose: ((event: unknown) => void) | null = null;
+    constructor(url: string | URL) {
+      super();
+      this.url = String(url);
+      window.setTimeout(() => {
+        this.onerror?.({ type: 'error', target: this });
+        this.onclose?.({ type: 'close', target: this });
+      }, 0);
+    }
+    send(): void {}
+    close(): void {}
+  }
+  (globalThis as unknown as { WebSocket: unknown }).WebSocket = UnavailableWebSocket;
+}
+
 class NoopObserver {
   observe() {}
   unobserve() {}

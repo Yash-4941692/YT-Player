@@ -416,36 +416,47 @@ export function subscribeCloudAnnotations(
   onChange: (change: AnnotationChange | null) => void,
   onUnavailable?: () => void,
 ): () => void {
-  if (!supabase) return () => undefined;
+  const client = supabase;
+  if (!client) return () => undefined;
   const table = annotationTable(scope);
   const topic = `annotations:${table}:${annotationFilter(scope)}:${userId}:${Math.random().toString(36).slice(2, 8)}`;
-  const channel = supabase
-    .channel(topic)
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table, filter: annotationFilter(scope) },
-      (payload: { eventType?: string; new?: Record<string, unknown> | null }) => {
-        if (payload.eventType === 'DELETE') {
-          onChange(null);
-          return;
-        }
-        const change = annotationChangeFromRow(payload.new);
-        // An event without the document (see `annotationChangeFromRow`) means "re-read the
-        // row", never "the PDF is empty".
-        onChange(change);
-      },
-    );
-  channel.subscribe((status) => {
-    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-      // Usually a table that is not published (or not migrated) yet. Give up quietly instead
-      // of retrying forever: the reader also re-reads when the tab regains focus.
-      onUnavailable?.();
-      if (supabase) void supabase.removeChannel(channel);
-    }
-  });
+  let channel: ReturnType<typeof client.channel> | null = null;
+  try {
+    channel = client
+      .channel(topic)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table, filter: annotationFilter(scope) },
+        (payload: { eventType?: string; new?: Record<string, unknown> | null }) => {
+          if (payload.eventType === 'DELETE') {
+            onChange(null);
+            return;
+          }
+          const change = annotationChangeFromRow(payload.new);
+          // An event without the document (see `annotationChangeFromRow`) means "re-read the
+          // row", never "the PDF is empty".
+          onChange(change);
+        },
+      );
+    channel.subscribe((status) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        // Usually a table that is not published (or not migrated) yet. Give up quietly instead
+        // of retrying forever: the reader also re-reads when the tab regains focus.
+        onUnavailable?.();
+        if (channel) void client.removeChannel(channel);
+      }
+    });
+  } catch (error) {
+    // Opening the realtime connection can fail outright — an environment without WebSocket, a
+    // project with realtime switched off. Live updates are a bonus and the reader re-reads the
+    // account copy when it opens and whenever the tab regains focus, so this must never take
+    // the reader down with it.
+    console.warn('Live annotation updates are unavailable:', error instanceof Error ? error.message : error);
+    onUnavailable?.();
+    return () => undefined;
+  }
   return () => {
-    if (!supabase) return;
-    void supabase.removeChannel(channel);
+    if (channel) void client.removeChannel(channel);
   };
 }
 
