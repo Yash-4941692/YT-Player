@@ -18,7 +18,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22 is the current LTS and what Vercel builds with. Node 20 is no longer
+          # supported by the toolchain: supabase-js warns about it, and the jsdom used by the
+          # cross-device sync checks requires ^22.22.2.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
