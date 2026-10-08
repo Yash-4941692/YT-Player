@@ -27,10 +27,14 @@ The app now has a **Continue with Google** button. A new user is created automat
    1. [`002_pdf_library.sql`](./supabase/migrations/002_pdf_library.sql) — the PDF library shelf.
    2. [`003_pdf_annotations.sql`](./supabase/migrations/003_pdf_annotations.sql) — annotations drawn on library PDFs.
    3. [`005_pdf_activity_and_trash.sql`](./supabase/migrations/005_pdf_activity_and_trash.sql) — "Recently deleted" PDFs and per-PDF activity (last opened, page count).
+   4. [`006_lesson_annotations.sql`](./supabase/migrations/006_lesson_annotations.sql) — annotations drawn on a **lesson's own PDF notes** (uploaded straight onto a lesson) sync across devices too, plus live updates between devices. Required for lesson notes to sync; the app keeps working locally without it.
+   5. [`007_repair_watch_items.sql`](./supabase/migrations/007_repair_watch_items.sql) — **run this one if lessons or their PDFs never reached a second device.** It creates/repairs the `watch_items` table that holds every lesson, its progress, its chapters and the pointer to its PDF notes.
+
+   > Earlier copies of `schema.sql` wrote the progress column as `current_time`. PostgreSQL treats `CURRENT_TIME` as a reserved word, so that single `CREATE TABLE` statement failed and `watch_items` (and its policies) were never created — every lesson write was then rejected, which is exactly why lessons and the PDFs attached to them did not follow your account to another device. `schema.sql` now quotes that column, and `007_repair_watch_items.sql` repairs a project created by the old file without touching a single row.
 
    [`004_optional_drop_legacy.sql`](./supabase/migrations/004_optional_drop_legacy.sql) is **optional**: it is never run automatically and only removes old, unused leftovers from very early versions.
 
-   (Re-running the full `schema.sql` is also safe; it is written to be repeatable.)
+   (Re-running the full `schema.sql` is also safe; it is written to be repeatable. Every file above was re-run twice against a real PostgreSQL before shipping, and each one only ever adds something.)
 
 ### 2. Create Google OAuth credentials (one time for this website)
 
@@ -83,10 +87,10 @@ Open any PDF from the library to get the full-screen reader with an annotation b
 - **Highlight** — select text with your finger or mouse and the highlight follows the words. If a PDF has no selectable text (a scan, for example), drag a box instead.
 - **Pen**, **Rectangle**, **Ellipse** — freehand ink and shapes, with black/red/blue ink and yellow/green/pink/blue highlights.
 - **Note** — tap anywhere to drop a sticky note, type, then **Save note**.
-- **Eraser** — tap any annotation to delete it. **Clear all** removes everything on that PDF (undo still works until you save).
+- **Eraser** — tap any annotation to delete it. **Clear all** removes everything on that PDF. Clearing is the one action that waits for an explicit **Save** (or Undo), so an accidental tap stays undoable.
 - **Undo / redo** — the toolbar buttons, or **Ctrl/Cmd+Z**, **Ctrl/Cmd+Shift+Z** and **Ctrl+Y**.
-- **Save** — annotations are only written when you press **Save**; the bar shows *Unsaved changes* until then, and closing the reader with unsaved work asks first. Annotations are stored normalised (0–1 of each page), so they look the same at every zoom level and on every device.
-- Signed in: annotations sync with the account. Guest: they live in the current tab only, and the reader says so.
+- **Saving is automatic.** Every stroke, highlight, note and deletion is kept in the browser instantly and pushed to the account a moment later, plus immediately when the reader is closed, the tab is hidden or the page is left. The **Save** button is still there for an explicit write; the bar shows *Unsaved changes* only until the automatic save finishes. Annotations are stored normalised (0–1 of each page), so they look the same at every zoom level and on every device.
+- **Sync** — signed-in users get their annotations on every device: on open the newest copy wins (local edits the account has not seen are pushed up, otherwise the account copy loads, so deletions and clears sync too). With [`006_lesson_annotations.sql`](./supabase/migrations/006_lesson_annotations.sql) applied, a drawing saved on one device also appears live on another device that already has the same PDF open, and the same is true for **PDF notes attached to a lesson** (not just library PDFs). Guests keep annotations in the current tab only, and the reader says so. If a write to the account fails, the reader says *Saved in this browser only* instead of pretending it synced.
 
 ### Storage meter, Recently opened and Recently deleted
 

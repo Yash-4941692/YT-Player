@@ -386,11 +386,17 @@ export function useAnnotationHistory(initial: Annotation[] = []): AnnotationEdit
   const presentRef = useRef(present);
   presentRef.current = present;
 
+  /**
+   * Every edit builds on the previous one through `presentRef`, so the ref is advanced
+   * straight away. Several edits can land in the same tick — one highlight per page for a
+   * selection that crosses pages, an eraser drag over two overlapping marks, redo right
+   * after a stroke — and each one must see the one before it instead of the last render.
+   */
   const commit = useCallback((next: Annotation[]) => {
-    setPresent((current) => {
-      setPast((stack) => [...stack, current].slice(-HISTORY_LIMIT));
-      return next;
-    });
+    const previous = presentRef.current;
+    presentRef.current = next;
+    setPresent(next);
+    setPast((stack) => [...stack, previous].slice(-HISTORY_LIMIT));
     setFuture([]);
   }, []);
 
