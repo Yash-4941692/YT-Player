@@ -23,6 +23,7 @@ import {
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
 import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
+import { Analytics } from '@vercel/analytics/react';
 import './styles.css';
 import './readability.css';
 
@@ -1300,6 +1301,7 @@ export default function App() {
           onPageCount={handlePdfPageCount}
         />
       )}
+      <Analytics />
     </div>
   );
 }
