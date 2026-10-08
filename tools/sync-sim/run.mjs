@@ -58,6 +58,10 @@ const bundle = spawnSync('node_modules/.bin/esbuild', [
   `--outfile=${join(buildDir, 'device.mjs')}`,
   '--log-level=warning',
 ], { cwd: root, encoding: 'utf8' });
+if (bundle.error) {
+  console.error('could not run node_modules/.bin/esbuild:', bundle.error.message);
+  process.exit(1);
+}
 if (bundle.status !== 0) {
   console.error(bundle.stdout, bundle.stderr);
   process.exit(1);
@@ -88,7 +92,11 @@ function runDevice(label, mode, extraEnv = {}, waitMs = 90000) {
       const line = out.split('\n').find((entry) => entry.startsWith('RESULT '));
       const payload = line ? JSON.parse(line.slice('RESULT '.length)) : { error: 'no result line', out, err };
       console.log(`\n— ${label} (${mode}) —`);
-      if (payload.error) console.log(`  error: ${String(payload.error).split('\n')[0]}`);
+      if (payload.error) {
+        console.log(`  error: ${String(payload.error).split('\n').slice(0, 6).join('\n         ')}`);
+        if (payload.out) console.log(`  stdout: ${String(payload.out).trim().slice(0, 600) || '(empty)'}`);
+        if (payload.err) console.log(`  stderr: ${String(payload.err).trim().slice(0, 600) || '(empty)'}`);
+      }
       console.log(`  annotations on this device: ${JSON.stringify(payload.annotations)}`);
       if (payload.bridge?.status) console.log(`  reader status: ${payload.bridge.status}`);
       resolveRun(payload);
@@ -108,7 +116,31 @@ const server = spawn(process.execPath, [join(here, 'mock-supabase.mjs')], {
 let serverLog = '';
 server.stdout.on('data', (chunk) => { serverLog += chunk; });
 server.stderr.on('data', (chunk) => { serverLog += chunk; });
-await new Promise((resolveWait) => setTimeout(resolveWait, 350));
+/**
+ * Wait until the stand-in API is really listening. A fixed sleep is not enough on a cold CI
+ * machine: the first device would then fail to reach the server and the whole run would look
+ * like a sync failure.
+ */
+async function waitForServer(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${API}/__state`);
+      if (response.ok) return true;
+    } catch {
+      // not up yet
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  return false;
+}
+
+if (!(await waitForServer())) {
+  console.error('the stand-in Supabase API never started listening:');
+  console.error(serverLog || '(no output)');
+  server.kill('SIGTERM');
+  process.exit(1);
+}
 
 const headers = {
   fresh: `=== ${scenario}: device B opens the PDF for the first time ===`,
@@ -149,7 +181,7 @@ try {
     results.push(await runDevice(label, mode, {
       SIM_PROFILE: profile,
       SIM_DEVICE: which,
-      ...(flaky ? { SIM_SETTLE_MS: '14000' } : {}),
+      ...(flaky ? { SIM_SETTLE_MS: '16000' } : {}),
       ...skew,
     }));
   }

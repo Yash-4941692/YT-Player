@@ -9,7 +9,7 @@
  *   SIM_PDF=<uuid>             library PDF id (library scope) …
  *   SIM_LESSON=<videoId>       … or the YouTube video id of a lesson PDF (lesson scope)
  *   SIM_CLOCK_OFFSET_MS=0      pretend this device's clock is off by this much
- *   SIM_SETTLE_MS=2600         how long to wait for the sync round trip
+ *   SIM_SETTLE_MS=3500         how long to wait for the sync round trip
  *   SIM_API=http://127.0.0.1:8787
  *   SIM_PROFILE=<file>         keep this device's localStorage between runs (a real device
  *                              keeps its cached copies, which is where stale data shows up)
@@ -23,7 +23,7 @@ const user = process.env.SIM_USER || '11111111-1111-4111-8111-111111111111';
 const pdfId = process.env.SIM_PDF || '22222222-2222-4222-8222-222222222222';
 const lessonId = process.env.SIM_LESSON || '';
 const clockOffset = Number(process.env.SIM_CLOCK_OFFSET_MS || 0);
-const settleMs = Number(process.env.SIM_SETTLE_MS || 2600);
+const settleMs = Number(process.env.SIM_SETTLE_MS || 3500);
 const api = process.env.SIM_API || 'http://127.0.0.1:8787';
 
 const profileFile = process.env.SIM_PROFILE || '';

@@ -31,6 +31,10 @@ const bundle = spawnSync('node_modules/.bin/esbuild', [
   `--outfile=${join(buildDir, 'unit.mjs')}`,
   '--log-level=warning',
 ], { cwd: root, encoding: 'utf8' });
+if (bundle.error) {
+  console.error('could not run node_modules/.bin/esbuild:', bundle.error.message);
+  process.exit(1);
+}
 if (bundle.status !== 0) {
   console.error(bundle.stdout, bundle.stderr);
   process.exit(1);
