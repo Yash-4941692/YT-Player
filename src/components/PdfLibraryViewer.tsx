@@ -239,7 +239,10 @@ export function usePdfAnnotationController({
       }
     } catch (error) {
       if (cacheKeyRef.current === key) {
-        setAnnotateStatus(annotationSyncHint(error, target, true));
+        // Say that a retry is coming while there is one left; after that the next edit, focus,
+        // "online" event or Save press is what pushes the document again.
+        const stillRetrying = retryAttemptRef.current < SAVE_RETRY_DELAYS_MS.length;
+        setAnnotateStatus(annotationSyncHint(error, target, stillRetrying));
       }
       // The browser copy above is already saved; the retry below pushes it again.
     } finally {
