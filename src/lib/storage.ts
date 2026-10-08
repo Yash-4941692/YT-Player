@@ -128,27 +128,106 @@ export function saveLocalPdfActivity(activity: Record<string, StoredPdfActivity>
   }
 }
 
-export function loadLocalAnnotations(pdfId: string): unknown | null {
+/* ---------------------------------------------------------------------------
+ * Annotations — the local half of the cross-device sync.
+ *
+ * Every PDF's drawings are kept in this browser next to the bookkeeping the sync
+ * layer needs to decide which copy is newer:
+ *
+ *   pending          this browser holds changes the account has not confirmed yet
+ *   localUpdatedAt   when this browser last changed them
+ *   cloudUpdatedAt   the `updated_at` of the account copy this browser last saw
+ *
+ * Without those, an older browser copy could silently win over a newer account
+ * copy (and the other way round), which is exactly how drawings went missing on
+ * a second device. Values written by older versions are read as "never confirmed
+ * by the account", so they are only used when the account has nothing at all.
+ * ------------------------------------------------------------------------- */
+
+const ANNOTATION_CACHE_VERSION = 2;
+
+export interface AnnotationCacheEntry {
+  /** The annotation document ({ version: 1, annotations: [...] }). */
+  data: unknown;
+  /** When this browser last changed the document. */
+  localUpdatedAt: number;
+  /** The account copy's `updated_at` that this browser last saw (0 = never synced). */
+  cloudUpdatedAt: number;
+  /** True when this browser holds changes the account has not confirmed yet. */
+  pending: boolean;
+}
+
+/**
+ * Same-tab cache in front of localStorage: the lesson notes panel and the full-screen
+ * reader can show the same PDF at once, and they must never disagree.
+ */
+const annotationMemory = new Map<string, AnnotationCacheEntry>();
+
+function annotationKey(pdfId: string): string {
+  return `${PDF_ANNOTATIONS_PREFIX}${pdfId}`;
+}
+
+export function loadAnnotationCache(pdfId: string): AnnotationCacheEntry | null {
+  const key = annotationKey(pdfId);
+  const inMemory = annotationMemory.get(key);
+  if (inMemory) return inMemory;
   try {
-    const raw = window.localStorage.getItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const stored = parsed as Partial<AnnotationCacheEntry> & { v?: number; data?: unknown };
+    if (stored.v === ANNOTATION_CACHE_VERSION) {
+      const entry: AnnotationCacheEntry = {
+        data: stored.data ?? null,
+        localUpdatedAt: Number(stored.localUpdatedAt) || 0,
+        cloudUpdatedAt: Number(stored.cloudUpdatedAt) || 0,
+        pending: Boolean(stored.pending),
+      };
+      annotationMemory.set(key, entry);
+      return entry;
+    }
+    // A copy written before sync bookkeeping existed: keep it as unconfirmed local work.
+    const legacy: AnnotationCacheEntry = {
+      data: parsed,
+      localUpdatedAt: 0,
+      cloudUpdatedAt: 0,
+      pending: true,
+    };
+    annotationMemory.set(key, legacy);
+    return legacy;
   } catch {
     return null;
   }
 }
 
-export function saveLocalAnnotations(pdfId: string, data: unknown): void {
+export function saveAnnotationCache(pdfId: string, entry: AnnotationCacheEntry): void {
+  const key = annotationKey(pdfId);
+  annotationMemory.set(key, entry);
   try {
-    window.localStorage.setItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`, JSON.stringify(data));
+    window.localStorage.setItem(key, JSON.stringify({ v: ANNOTATION_CACHE_VERSION, ...entry }));
   } catch {
-    // Ignore storage quota errors.
+    // Ignore storage quota errors: the in-memory copy keeps this tab working.
   }
 }
 
+/**
+ * Re-key a browser copy: used when a guest's PDF is saved into the account and gets a new
+ * library id, so the drawings made before signing in follow it instead of being orphaned
+ * under the old session id. The copy is marked pending, so it is pushed on the next open.
+ */
+export function moveAnnotationCache(fromId: string, toId: string): void {
+  if (!fromId || !toId || fromId === toId) return;
+  const entry = loadAnnotationCache(fromId);
+  if (!entry) return;
+  saveAnnotationCache(toId, { ...entry, pending: true });
+  deleteLocalAnnotations(fromId);
+}
+
 export function deleteLocalAnnotations(pdfId: string): void {
+  annotationMemory.delete(annotationKey(pdfId));
   try {
-    window.localStorage.removeItem(`${PDF_ANNOTATIONS_PREFIX}${pdfId}`);
+    window.localStorage.removeItem(annotationKey(pdfId));
   } catch {
     // Ignore storage errors.
   }

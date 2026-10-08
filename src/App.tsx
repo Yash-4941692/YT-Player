@@ -11,13 +11,13 @@ import { PdfLibraryViewer, usePdfAnnotationController } from './components/PdfLi
 import { PdfViewer } from './components/PdfViewer';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
-  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudPdf, deleteCloudVideo,
-  deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
+  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
+  deleteCloudVideo, deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
   isLibraryPath, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase, trashLibraryPdf,
   updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
 import {
-  deleteLocalAnnotations, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState,
+  deleteLocalAnnotations, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState, moveAnnotationCache,
   saveLocalPdfActivity, saveLocalPdfTrash, saveLocalState, upsertVideo,
 } from './lib/storage';
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
@@ -148,9 +148,13 @@ export default function App() {
     [activeRecord?.pdfPath, libraryPdfs],
   );
   const lessonPdfId = linkedLibraryPdf?.id ?? (activeVideoId && pdfPreview?.url ? `lesson:${activeVideoId}` : null);
+  // A lesson's own PDF notes sync through the lesson row, a PDF attached from the library
+  // syncs through its library row — either way the drawings follow the account.
   const lessonAnnotations = usePdfAnnotationController({
-    pdfId: lessonPdfId,
-    isGuest: Boolean(!authUser || !linkedLibraryPdf || linkedLibraryPdf.sessionOnly),
+    cacheKey: lessonPdfId,
+    libraryPdfId: linkedLibraryPdf?.id ?? null,
+    lessonVideoId: linkedLibraryPdf ? null : activeVideoId,
+    isGuest: Boolean(!authUser || linkedLibraryPdf?.sessionOnly),
     userId: authUser?.id ?? null,
     shortcutsEnabled: !openLibraryPdf && panelView === 'notes',
   });
@@ -285,6 +289,8 @@ export default function App() {
       for (const item of pending) {
         try {
           const created = await createLibraryPdf(userId, item.file as File, item.subject);
+          // Annotations drawn in guest mode follow the PDF under its new account id.
+          moveAnnotationCache(item.id, created.id);
           setLibraryPdfs((current) => sortLibrary([created, ...current.filter((entry) => entry.id !== item.id)]));
         } catch (error) {
           setLibraryError(error instanceof Error
@@ -902,6 +908,10 @@ export default function App() {
     }
     delete notesSessionRef.current[activeVideoId];
     deleteLocalAnnotations(`lesson:${activeVideoId}`);
+    // The note's synced drawings go with it, so a later PDF on this lesson starts clean.
+    if (authUser && supabase && !linkedLibraryPdf) {
+      void deleteCloudLessonAnnotations(authUser.id, activeVideoId).catch(() => undefined);
+    }
     updateVideo(activeVideoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
     setPdfPreview(null);
     setNotesRevision((value) => value + 1);
@@ -967,6 +977,10 @@ export default function App() {
 
     delete notesSessionRef.current[record.videoId];
     deleteLocalAnnotations(`lesson:${record.videoId}`);
+    // Fail soft: a project that has not run the newest migration simply has no such table.
+    if (authUser && supabase) {
+      void deleteCloudLessonAnnotations(authUser.id, record.videoId).catch(() => undefined);
+    }
     setVideos((current) => current.filter((video) => video.videoId !== record.videoId));
     // Stop the study room when the lesson on screen is the one being deleted, so playback
     // ticks cannot re-create the record that was just removed.

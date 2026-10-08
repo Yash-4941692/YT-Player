@@ -259,13 +259,52 @@ export interface PdfAnnotationRecord {
   updatedAt: number;
 }
 
-/** Read the saved annotation document for one library PDF, or null when there is none yet. */
-export async function fetchPdfAnnotations(userId: string, pdfId: string): Promise<PdfAnnotationRecord | null> {
+/**
+ * Which kind of PDF an annotation document belongs to:
+ * - `library` — a PDF on the personal shelf (`pdf_annotations`, keyed by the library row id).
+ * - `lesson`  — the PDF attached to one lesson, uploaded beside the video
+ *               (`lesson_annotations`, keyed by the YouTube video id).
+ * Both are stored and synced the same way, so drawings made anywhere in the app
+ * follow the account to every device.
+ */
+export type AnnotationScope =
+  | { kind: 'library'; pdfId: string }
+  | { kind: 'lesson'; videoId: string };
+
+function annotationTable(scope: AnnotationScope): string {
+  return scope.kind === 'library' ? 'pdf_annotations' : 'lesson_annotations';
+}
+
+function annotationFilter(scope: AnnotationScope): string {
+  return scope.kind === 'library' ? `pdf_id=eq.${scope.pdfId}` : `video_id=eq.${scope.videoId}`;
+}
+
+function annotationRow(scope: AnnotationScope): Record<string, string> {
+  return scope.kind === 'library' ? { pdf_id: scope.pdfId } : { video_id: scope.videoId };
+}
+
+/**
+ * True when PostgREST reports a missing table (the owner has not run the newest
+ * migration yet) or a missing column, so callers can fall back to browser storage
+ * and explain what to run instead of silently pretending everything synced.
+ */
+export function isMissingTableError(error: unknown): boolean {
+  const code = (error as { code?: string } | null | undefined)?.code ?? '';
+  if (code === '42P01' || code === '42703' || code === 'PGRST205') return true;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /does not exist|schema cache|could not find the table|relation .* does not exist/i.test(message);
+}
+
+/** Read the saved annotation document for one PDF, or null when there is none yet. */
+export async function fetchCloudAnnotations(
+  userId: string,
+  scope: AnnotationScope,
+): Promise<PdfAnnotationRecord | null> {
   if (!supabase) return null;
   const { data, error } = await supabase
-    .from('pdf_annotations')
+    .from(annotationTable(scope))
     .select('data, updated_at')
-    .eq('pdf_id', pdfId)
+    .eq(scope.kind === 'library' ? 'pdf_id' : 'video_id', scope.kind === 'library' ? scope.pdfId : scope.videoId)
     .eq('user_id', userId)
     .maybeSingle();
   if (error) throw error;
@@ -277,18 +316,88 @@ export async function fetchPdfAnnotations(userId: string, pdfId: string): Promis
   };
 }
 
-/** Upsert the annotation document for one library PDF. */
-export async function savePdfAnnotations(userId: string, pdfId: string, data: unknown): Promise<number> {
+/** Upsert the annotation document for one PDF. Returns the account copy's timestamp. */
+export async function saveCloudAnnotations(
+  userId: string,
+  scope: AnnotationScope,
+  data: unknown,
+): Promise<number> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
   const updatedAt = new Date().toISOString();
   const { error } = await supabase
-    .from('pdf_annotations')
+    .from(annotationTable(scope))
     .upsert(
-      { pdf_id: pdfId, user_id: userId, data, updated_at: updatedAt },
-      { onConflict: 'pdf_id' },
+      { ...annotationRow(scope), user_id: userId, data, updated_at: updatedAt },
+      { onConflict: scope.kind === 'library' ? 'pdf_id' : 'user_id,video_id' },
     );
   if (error) throw error;
   return new Date(updatedAt).getTime();
+}
+
+/** Remove the account copy of one PDF's annotations (used when notes are taken off a lesson). */
+export async function deleteCloudAnnotations(userId: string, scope: AnnotationScope): Promise<void> {
+  if (!supabase) return;
+  const { error } = await supabase
+    .from(annotationTable(scope))
+    .delete()
+    .eq(scope.kind === 'library' ? 'pdf_id' : 'video_id', scope.kind === 'library' ? scope.pdfId : scope.videoId)
+    .eq('user_id', userId);
+  if (error && !isMissingTableError(error)) throw error;
+}
+
+/** Drop every synced annotation document that belongs to one lesson. */
+export async function deleteCloudLessonAnnotations(userId: string, videoId: string): Promise<void> {
+  await deleteCloudAnnotations(userId, { kind: 'lesson', videoId });
+}
+
+export interface AnnotationChange {
+  /** The saved document, or null when the row was deleted and the caller should re-read it. */
+  annotations: unknown;
+  updatedAt: number;
+}
+
+/**
+ * Live updates for one PDF, so a drawing saved on another device appears here without a
+ * reload. Returns an unsubscribe function. Projects without the realtime migration (or a
+ * table that is not published) simply never receive an event — the reader still refetches
+ * whenever the tab regains focus, so nothing depends on this working.
+ */
+export function subscribeCloudAnnotations(
+  userId: string,
+  scope: AnnotationScope,
+  onChange: (change: AnnotationChange | null) => void,
+  onUnavailable?: () => void,
+): () => void {
+  if (!supabase) return () => undefined;
+  const table = annotationTable(scope);
+  const topic = `annotations:${table}:${annotationFilter(scope)}:${userId}:${Math.random().toString(36).slice(2, 8)}`;
+  const channel = supabase
+    .channel(topic)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table, filter: annotationFilter(scope) },
+      (payload: { eventType?: string; new?: Record<string, unknown> | null }) => {
+        if (payload.eventType === 'DELETE') {
+          onChange(null);
+          return;
+        }
+        const row = payload.new ?? {};
+        const updatedAt = typeof row.updated_at === 'string' ? new Date(row.updated_at).getTime() : Date.now();
+        onChange({ annotations: row.data, updatedAt });
+      },
+    );
+  channel.subscribe((status) => {
+    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      // Usually a table that is not published (or not migrated) yet. Give up quietly instead
+      // of retrying forever: the reader also re-reads when the tab regains focus.
+      onUnavailable?.();
+      if (supabase) void supabase.removeChannel(channel);
+    }
+  });
+  return () => {
+    if (!supabase) return;
+    void supabase.removeChannel(channel);
+  };
 }
 
 /* ---------------------------------------------------------------------------

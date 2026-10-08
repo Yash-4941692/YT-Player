@@ -3,7 +3,8 @@
 -- watch_items.is_revision and watch_items.bookmarks are no longer read or written by the
 -- app. The app reads/writes watch_items (lessons, progress, chapters, PDF pointers),
 -- pdf_library (the personal, cross-device PDF shelf), pdf_annotations (annotations drawn
--- on library PDFs) and the private video-notes bucket.
+-- on library PDFs), lesson_annotations (annotations drawn on a lesson's own PDF notes) and
+-- the private video-notes bucket.
 -- Existing projects that want those unused columns gone can opt in by running
 -- supabase/migrations/004_optional_drop_legacy.sql — that file is never run automatically
 -- and is not needed for the app to work.
@@ -18,7 +19,11 @@ create table if not exists public.watch_items (
   playlist_id text,
   playlist_index integer,
   chapters_raw text not null default '',
-  current_time double precision not null default 0,
+  -- PostgreSQL treats CURRENT_TIME as a reserved word, so this column MUST stay quoted:
+  -- unquoted it is a syntax error, the whole CREATE TABLE fails and nothing about lessons
+  -- (progress, chapters, the PDF pointer) can sync. Quoted, the column name is still the
+  -- plain lowercase `current_time` that the app reads and writes.
+  "current_time" double precision not null default 0,
   duration double precision not null default 0,
   subject text not null default 'Other' check (subject in ('Physics', 'Chemistry', 'Mathematics', 'Other')),
   is_revision boolean not null default false,
@@ -119,6 +124,64 @@ create policy "Users update their own PDF annotations" on public.pdf_annotations
 drop policy if exists "Users delete their own PDF annotations" on public.pdf_annotations;
 create policy "Users delete their own PDF annotations" on public.pdf_annotations
   for delete to authenticated using (auth.uid() = user_id);
+
+-- Annotations drawn on a lesson's OWN PDF notes (uploaded straight onto the lesson rather
+-- than into the library): one row per user + video id, same shape of `data` as above.
+create table if not exists public.lesson_annotations (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  video_id text not null,
+  data jsonb not null default '{"version":1,"annotations":[]}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, video_id)
+);
+
+create index if not exists lesson_annotations_user_updated_idx
+  on public.lesson_annotations (user_id, updated_at desc);
+
+alter table public.lesson_annotations enable row level security;
+grant select, insert, update, delete on public.lesson_annotations to authenticated;
+
+drop policy if exists "Users read their own lesson annotations" on public.lesson_annotations;
+create policy "Users read their own lesson annotations" on public.lesson_annotations
+  for select to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "Users add their own lesson annotations" on public.lesson_annotations;
+create policy "Users add their own lesson annotations" on public.lesson_annotations
+  for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists "Users update their own lesson annotations" on public.lesson_annotations;
+create policy "Users update their own lesson annotations" on public.lesson_annotations
+  for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "Users delete their own lesson annotations" on public.lesson_annotations;
+create policy "Users delete their own lesson annotations" on public.lesson_annotations
+  for delete to authenticated using (auth.uid() = user_id);
+
+-- Live updates between devices: both annotation tables are published for realtime, which
+-- still respects the row level security policies above. Purely optional — the app also
+-- re-reads annotations when the tab regains focus and whenever a PDF is reopened.
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'pdf_annotations'
+    ) then
+      alter publication supabase_realtime add table public.pdf_annotations;
+    end if;
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'lesson_annotations'
+    ) then
+      alter publication supabase_realtime add table public.lesson_annotations;
+    end if;
+  end if;
+exception when others then
+  -- Publishing is a bonus, never a requirement: the tables above are already usable and the
+  -- app falls back to re-reading annotations when the tab regains focus.
+  raise notice 'Focusframe: could not publish annotation tables for realtime (%).', sqlerrm;
+end $$;
 
 -- "Recently deleted" PDFs. The pdf_library row and the stored file are kept; a row here
 -- just means "hidden from the library until restored or deleted forever".
