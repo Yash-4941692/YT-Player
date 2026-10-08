@@ -27,3 +27,8 @@ jobs:
       - name: Type-check and build
         # `npm run build` runs `tsc -b` first, then the Vite production build.
         run: npm run build
+
+      - name: Cross-device PDF sync checks
+        # Two simulated devices (each its own browser profile, one with a clock that
+        # disagrees) must see each other's PDF drawings, including after a failed save.
+        run: npm run test:sync

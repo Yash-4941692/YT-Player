@@ -89,8 +89,10 @@ Open any PDF from the library to get the full-screen reader with an annotation b
 - **Note** — tap anywhere to drop a sticky note, type, then **Save note**.
 - **Eraser** — tap any annotation to delete it. **Clear all** removes everything on that PDF. Clearing is the one action that waits for an explicit **Save** (or Undo), so an accidental tap stays undoable.
 - **Undo / redo** — the toolbar buttons, or **Ctrl/Cmd+Z**, **Ctrl/Cmd+Shift+Z** and **Ctrl+Y**.
-- **Saving is automatic.** Every stroke, highlight, note and deletion is kept in the browser instantly and pushed to the account a moment later, plus immediately when the reader is closed, the tab is hidden or the page is left. The **Save** button is still there for an explicit write; the bar shows *Unsaved changes* only until the automatic save finishes. Annotations are stored normalised (0–1 of each page), so they look the same at every zoom level and on every device.
-- **Sync** — signed-in users get their annotations on every device: on open the newest copy wins (local edits the account has not seen are pushed up, otherwise the account copy loads, so deletions and clears sync too). With [`006_lesson_annotations.sql`](./supabase/migrations/006_lesson_annotations.sql) applied, a drawing saved on one device also appears live on another device that already has the same PDF open, and the same is true for **PDF notes attached to a lesson** (not just library PDFs). Guests keep annotations in the current tab only, and the reader says so. If a write to the account fails, the reader says *Saved in this browser only* instead of pretending it synced.
+- **Saving is automatic.** Every stroke, highlight, note and deletion is kept in the browser instantly and pushed to the account a moment later, plus immediately when the reader is closed, the tab is hidden or the page is left. The **Save** button is still there for an explicit write, and a Save pressed while a write is already running is queued rather than dropped; the bar shows *Unsaved changes* only until the automatic save finishes. Annotations are stored normalised (0–1 of each page), so they look the same at every zoom level and on every device.
+- **Sync** — signed-in users get their annotations on every device: on open the newest copy wins (local edits the account has not seen are pushed up, otherwise the account copy loads, so deletions and clears sync too). With [`006_lesson_annotations.sql`](./supabase/migrations/006_lesson_annotations.sql) applied, a drawing saved on one device also appears live on another device that already has the same PDF open, and the same is true for **PDF notes attached to a lesson** (not just library PDFs). Guests keep annotations in the current tab only, and the reader says so. If a write to the account fails, the reader says *Saved in this browser only* instead of pretending it synced, and **retries the save itself** (1.5 s, 4 s, 10 s, 20 s, 30 s, then again on the next edit, focus, `online` event or Save press).
+- **Why drawings reach the other device even when a clock is wrong.** Every save of one PDF carries a revision stamp, and each device only replaces its copy with a *newer* one. Building that stamp from the clock alone was what broke cross-device saving: a phone a few minutes fast, a laptop in another timezone or a clock that had drifted made a device's own drawing look **older** than the copy already stored, so the other device ignored it forever. The stamp is now built from the newest revision the device has actually seen (`nextRevisionStamp`), so it is always strictly newer than anything it knows about and the revision sequence for a document only moves forward. A realtime event that arrives without the document (a large `data` column can be omitted from an update event) is treated as "re-read it" rather than "this PDF is empty".
+- **Missing tables are reported up front.** After sign-in the app checks for the two annotation tables and, when one is absent, says so straight away — naming the migration file to run — instead of only failing the first time a drawing is saved.
 
 ### Storage meter, Recently opened and Recently deleted
 
@@ -106,6 +108,22 @@ The site and guest mode can be hosted without charge within the current Vercel f
 npm install
 npm run dev
 ```
+
+### Checking that drawings still reach a second device
+
+```bash
+npm run test:sync          # everything below, one after the other
+npm run test:sync:one      # one scenario: fresh | returning | lesson | flaky (add --clock-skew)
+```
+
+The checks run **two simulated devices** — each in its own process, with its own browser
+profile (localStorage, cached copies) and, with `--clock-skew`, its own clock — against a
+small stand-in for the Supabase REST API in [`tools/sync-sim`](./tools/sync-sim). They assert
+the thing users actually care about: a drawing made on device A is on device B, and the other
+way round, for library PDFs and for a lesson's own notes, when a device has an empty cache,
+when both devices keep their own cached copies, and when the first account writes fail
+(`flaky`) and have to be retried. `npm run test:sync` also runs the helper checks for the
+revision stamp and the realtime payload guard.
 
 ## Notes
 

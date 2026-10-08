@@ -13,8 +13,8 @@ import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
   cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
   deleteCloudVideo, deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
-  isLibraryPath, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase, trashLibraryPdf,
-  updateLibraryPdf, uploadCloudPdf,
+  isLibraryPath, probeAnnotationTables, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase,
+  trashLibraryPdf, updateLibraryPdf, uploadCloudPdf,
 } from './lib/supabase';
 import {
   deleteLocalAnnotations, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState, moveAnnotationCache,
@@ -36,6 +36,15 @@ interface PdfPreview {
 }
 
 const subjects: Subject[] = ['Physics', 'Chemistry', 'Mathematics', 'Other'];
+
+/** The SQL file that creates a missing annotation table, named in the sync warning. */
+function annotationMigrationHint(tables: string[]): string {
+  const files = new Set<string>();
+  if (tables.includes('pdf_annotations')) files.add('supabase/migrations/003_pdf_annotations.sql');
+  if (tables.includes('lesson_annotations')) files.add('supabase/migrations/006_lesson_annotations.sql');
+  return [...files].join(' and ');
+}
+
 const MAX_PDF_SIZE = 100 * 1024 * 1024;
 
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
@@ -109,6 +118,9 @@ export default function App() {
   const [pdfTrash, setPdfTrash] = useState<Record<string, number>>(loadLocalPdfTrash);
   const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>(loadLocalPdfActivity);
   const [trashUnavailable, setTrashUnavailable] = useState(false);
+  // Names of the annotation tables this project is missing, checked once per sign-in so the
+  // app can say which SQL file to run instead of only failing when a drawing is saved.
+  const [annotationTablesMissing, setAnnotationTablesMissing] = useState<string[]>([]);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const libraryMigratedRef = useRef(false);
@@ -339,6 +351,24 @@ export default function App() {
         });
       }
     })();
+    return () => { cancelled = true; };
+  }, [authUser?.id, libraryLoadedFor]);
+
+  // PDF drawings reach other devices through two tables. If this project has not had those
+  // migrations run, say so as soon as the account loads, rather than only when a drawing
+  // fails to save. The reader itself keeps working in this browser either way.
+  useEffect(() => {
+    if (!cloudConfigured || !authUser || libraryLoadedFor !== authUser.id) {
+      setAnnotationTablesMissing([]);
+      return;
+    }
+    let cancelled = false;
+    void probeAnnotationTables()
+      .then((probes) => {
+        if (cancelled) return;
+        setAnnotationTablesMissing(probes.filter((probe) => probe.missing).map((probe) => probe.table));
+      })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, [authUser?.id, libraryLoadedFor]);
 
@@ -1069,6 +1099,16 @@ export default function App() {
             )}
           </div>
         </header>
+
+        {annotationTablesMissing.length > 0 && (
+          <p className="cloud-warning annotation-sync-warning" role="status">
+            <CloudOff size={14} />
+            <span className="annotation-sync-warning-text">
+              PDF drawings are saved in this browser only: this Supabase project has no {annotationTablesMissing.join(' or ')} table yet.
+              Run <code>{annotationMigrationHint(annotationTablesMissing)}</code> in Supabase → SQL Editor, then reload this page to sync them across devices.
+            </span>
+          </p>
+        )}
 
         <main id="top">
           {!source ? (

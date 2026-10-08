@@ -8,6 +8,10 @@
 -- Run once in Supabase SQL Editor -> New query -> Run. Safe to run again.
 -- Success message: "Success. No rows returned."
 
+-- `updated_at` is the revision stamp written by the browser that saved the document (see
+-- `nextRevisionStamp` in src/lib/storage.ts); the app compares it across devices to decide
+-- which copy is newer. Do not add a trigger that replaces it with now(): a database clock
+-- behind the newest stored revision would move a document's revision backwards.
 create table if not exists public.pdf_annotations (
   -- One annotation document per library PDF. Deleting the PDF removes its annotations.
   pdf_id uuid primary key references public.pdf_library(id) on delete cascade,
