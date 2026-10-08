@@ -2,6 +2,8 @@
  * Fast checks on the two helpers the cross-device sync rests on. Bundled and run by
  * tools/sync-sim/run-all.mjs — no browser, no network.
  */
+// eslint-disable-next-line import/order -- must install the WebSocket fallback first
+import './websocket-shim';
 import { annotationChangeFromRow } from '../../src/lib/supabase';
 import { nextRevisionStamp, type AnnotationCacheEntry } from '../../src/lib/storage';
 

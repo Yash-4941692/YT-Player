@@ -26,6 +26,7 @@ const bundle = spawnSync('node_modules/.bin/esbuild', [
   '--platform=node',
   '--packages=external',
   '--loader:.ts=ts',
+  '--loader:.tsx=tsx',
   `--define:import.meta.env.VITE_SUPABASE_URL=${JSON.stringify('http://127.0.0.1:8787')}`,
   `--define:import.meta.env.VITE_SUPABASE_ANON_KEY=${JSON.stringify('sim-anon-key')}`,
   `--outfile=${join(buildDir, 'unit.mjs')}`,

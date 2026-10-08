@@ -31,9 +31,12 @@ jobs:
       - name: Cross-device PDF sync checks
         # Two simulated devices (each its own browser profile, one with a clock that
         # disagrees) must see each other's PDF drawings, including after a failed save.
+        # The tail of the run is also published as an annotation, so a failure can be read
+        # straight from the checks list (for example on a phone).
+        shell: bash
         run: |
           set -o pipefail
-          npm run test:sync 2>&1 | tee /tmp/sync.log || {
-            echo "::error::$(tail -c 1200 /tmp/sync.log | tr '\n' '|')"
+          if ! npm run test:sync 2>&1 | tee /tmp/sync.log; then
+            echo "::error title=Cross-device PDF sync checks failed::$(tail -c 1200 /tmp/sync.log | tr '\n' '|')"
             exit 1
-          }
+          fi

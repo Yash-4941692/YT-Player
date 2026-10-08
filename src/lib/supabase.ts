@@ -5,11 +5,21 @@ import type { LibraryPdf, Subject, VideoRecord } from '../types';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
-export const supabase = supabaseUrl && supabaseAnonKey
-  ? createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = (() => {
+  if (!supabaseUrl || !supabaseAnonKey) return null;
+  try {
+    return createClient(supabaseUrl, supabaseAnonKey, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-    })
-  : null;
+    });
+  } catch (error) {
+    // Creating the client can fail outright — supabase-js needs a WebSocket to exist, and a
+    // malformed project URL throws too. That must not take the whole study room down: the app
+    // keeps working in guest mode (the header then says the library is local) instead of
+    // failing to boot at all.
+    console.warn('Cloud sync is unavailable here:', error instanceof Error ? error.message : error);
+    return null;
+  }
+})();
 
 export const cloudConfigured = Boolean(supabase);
 
