@@ -116,7 +116,8 @@ npm run test:sync          # everything below, one after the other
 npm run test:sync:one      # one scenario: fresh | returning | lesson | flaky (add --clock-skew)
 ```
 
-The checks run **two simulated devices** — each in its own process, with its own browser
+The checks need **Node 22 or newer** (the jsdom they drive does), and they run on every pull
+request in CI. They run **two simulated devices** — each in its own process, with its own browser
 profile (localStorage, cached copies) and, with `--clock-skew`, its own clock — against a
 small stand-in for the Supabase REST API in [`tools/sync-sim`](./tools/sync-sim). They assert
 the thing users actually care about: a drawing made on device A is on device B, and the other
