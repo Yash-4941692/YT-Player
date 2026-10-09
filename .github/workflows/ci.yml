@@ -31,6 +31,12 @@ jobs:
         # `npm run build` runs `tsc -b` first, then the Vite production build.
         run: npm run build
 
+      - name: Installed-app icon checks
+        # Chrome silently installs with a text placeholder when the web app manifest or one of
+        # its icons is missing or wrong. This reads what ships (manifest, PNG dimensions, ICO
+        # entries, the head links) and fails the build if any of it is off.
+        run: npm run check:app-icon
+
       - name: Cross-device PDF sync checks
         # Two simulated devices (each its own browser profile, one with a clock that
         # disagrees) must see each other's PDF drawings, including after a failed save.

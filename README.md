@@ -126,6 +126,25 @@ when both devices keep their own cached copies, and when the first account write
 (`flaky`) and have to be retried. `npm run test:sync` also runs the helper checks for the
 revision stamp and the realtime payload guard.
 
+### The installed-app icon
+
+Installing the site from Chrome/Edge (⋮ → **Install Focusframe…**) opens it in its own window
+with the same mint tile you see in the tab, on the taskbar, Start menu, home screen and so on.
+That comes from [`public/manifest.webmanifest`](./public/manifest.webmanifest) plus the raster
+icons in [`public/icons`](./public/icons) — Chrome silently falls back to a text placeholder if
+the manifest or its icons are missing, so CI runs `npm run check:app-icon`, which reads the
+manifest and every icon it references and fails if one is absent, the wrong size, not square,
+or (for the maskable ones) not full-bleed.
+
+The icons are generated from [`public/favicon.svg`](./public/favicon.svg), so the tab icon and
+the app icon cannot drift apart. Only run this if you change the artwork; the output is
+committed:
+
+```bash
+npm install --no-save @resvg/resvg-js   # on demand, keeps `npm ci` light
+npm run build:app-icons
+```
+
 ## Notes
 
 - YouTube videos are embedded/streamed by YouTube; the app does not download or host videos. Some owners disable embedding, in which case the player offers a link to open the video on YouTube.

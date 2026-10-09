@@ -7,6 +7,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "build:app-icons": "node tools/app-icons/generate.mjs",
+    "check:app-icon": "node tools/check-app-icon.mjs",
     "test:sync": "node tools/sync-sim/run-all.mjs",
     "test:sync:one": "node tools/sync-sim/run.mjs"
   },
