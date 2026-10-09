@@ -373,7 +373,12 @@ export interface AnnotationEditorState {
   clearAll(): void;
   undo(): void;
   redo(): void;
-  markSaved(): void;
+  /**
+   * Record that a document was written out. Pass the exact list that was written when a save
+   * finished, otherwise edits made while that save was in flight are marked as saved too and
+   * the reader stops admitting it still has unsaved changes.
+   */
+  markSaved(annotations?: Annotation[]): void;
   replaceAll(annotations: Annotation[]): void;
 }
 
@@ -448,8 +453,8 @@ export function useAnnotationHistory(initial: Annotation[] = []): AnnotationEdit
     setSavedSnapshot(JSON.stringify(annotations));
   }, []);
 
-  const markSaved = useCallback(() => {
-    setSavedSnapshot(JSON.stringify(presentRef.current));
+  const markSaved = useCallback((annotations?: Annotation[]) => {
+    setSavedSnapshot(JSON.stringify(annotations ?? presentRef.current));
   }, []);
 
   const dirty = useMemo(() => JSON.stringify(present) !== savedSnapshot, [present, savedSnapshot]);

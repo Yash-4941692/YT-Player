@@ -14,6 +14,8 @@
 -- Run once in Supabase SQL Editor -> New query -> Run. Safe to run again.
 -- Success message: "Success. No rows returned."
 
+-- `updated_at` is the revision stamp written by the browser that saved the document, the
+-- same as in pdf_annotations. Do not replace it with a now() trigger.
 create table if not exists public.lesson_annotations (
   user_id uuid not null references auth.users(id) on delete cascade,
   -- The YouTube video id whose notes PDF the drawings belong to.

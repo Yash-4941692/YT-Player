@@ -4,3 +4,5 @@ dist
 .env.local
 .env.*.local
 .DS_Store
+tools/sync-sim/.build
+tools/sync-sim/.profiles

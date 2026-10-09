@@ -18,7 +18,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22 is the current LTS and what Vercel builds with. Node 20 is no longer
+          # supported by the toolchain: supabase-js warns about it, and the jsdom used by the
+          # cross-device sync checks requires ^22.22.2.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -27,3 +30,22 @@ jobs:
       - name: Type-check and build
         # `npm run build` runs `tsc -b` first, then the Vite production build.
         run: npm run build
+
+      - name: Installed-app icon checks
+        # Chrome silently installs with a text placeholder when the web app manifest or one of
+        # its icons is missing or wrong. This reads what ships (manifest, PNG dimensions, ICO
+        # entries, the head links) and fails the build if any of it is off.
+        run: npm run check:app-icon
+
+      - name: Cross-device PDF sync checks
+        # Two simulated devices (each its own browser profile, one with a clock that
+        # disagrees) must see each other's PDF drawings, including after a failed save.
+        # The tail of the run is also published as an annotation, so a failure can be read
+        # straight from the checks list (for example on a phone).
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! npm run test:sync 2>&1 | tee /tmp/sync.log; then
+            echo "::error title=Cross-device PDF sync checks failed::$(tail -c 1200 /tmp/sync.log | tr '\n' '|')"
+            exit 1
+          fi

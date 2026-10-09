@@ -96,6 +96,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .cloud-warning { color: #d7ba84; }
 .cloud-warning span { text-decoration: underline; cursor: help; }
 
+/* Shown while a signed-in account has no annotation tables yet: names the SQL file to run. */
+.annotation-sync-warning { align-items: flex-start; margin: 10px 0 0; }
+.annotation-sync-warning span.annotation-sync-warning-text { text-decoration: none; cursor: default; line-height: 1.65; }
+.annotation-sync-warning code { font: 10px var(--mono); color: #f2ddb4; background: rgba(255,209,147,.09); border: 1px solid rgba(255,209,147,.18); border-radius: 5px; padding: 1px 5px; white-space: nowrap; }
+
 /* Slim bar that replaces the hero once a lesson is open, so the video sits high on the page. */
 .load-bar { padding: 20px 0 6px; display: flex; flex-direction: column; }
 .load-bar .video-load-form { width: 100%; }

@@ -158,6 +158,27 @@ export interface AnnotationCacheEntry {
 }
 
 /**
+ * The revision stamp for the next write of one PDF's annotations.
+ *
+ * Every write of a document carries a stamp, and every device decides whether an incoming
+ * copy is newer by comparing stamps. If that stamp were simply "this device's clock", two
+ * devices whose clocks disagree — a phone a few minutes fast, a laptop in another timezone,
+ * a clock that drifted — would produce stamps that go backwards: the second device's drawing
+ * then looks *older* than the copy the first device already has, so it is ignored, and the
+ * drawing never arrives. That is exactly how changes made on one device stopped reaching the
+ * others.
+ *
+ * Building the stamp from the newest revision this device has already seen (its own last
+ * write, or the account copy it last read) makes every write strictly newer than anything
+ * that device knows about, whatever the two clocks say. The sequence of revisions for a
+ * document therefore only ever moves forward, so no device can get stuck ignoring the other.
+ */
+export function nextRevisionStamp(entry: AnnotationCacheEntry | null | undefined, now: number = Date.now()): number {
+  const seen = Math.max(entry?.cloudUpdatedAt || 0, entry?.localUpdatedAt || 0);
+  return Math.max(Math.round(now), seen + 1);
+}
+
+/**
  * Same-tab cache in front of localStorage: the lesson notes panel and the full-screen
  * reader can show the same PDF at once, and they must never disagree.
  */

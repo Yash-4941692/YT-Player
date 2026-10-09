@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Cloud, HardDrive, Info, X } from 'lucide-react';
 import { PdfViewer, type PdfAnnotationBridge } from './PdfViewer';
 import { pdfTitle } from '../lib/pdfLibrary';
-import { loadAnnotationCache, saveAnnotationCache, type AnnotationCacheEntry } from '../lib/storage';
+import { loadAnnotationCache, nextRevisionStamp, saveAnnotationCache, type AnnotationCacheEntry } from '../lib/storage';
 import { useDialog } from '../lib/useDialog';
 import {
   DEFAULT_HIGHLIGHT, DEFAULT_HIGHLIGHT_WIDTH, DEFAULT_PEN, DEFAULT_PEN_WIDTH,
@@ -25,19 +25,28 @@ const AUTOSAVE_DELAY_MS = 1400;
 /**
  * A cloud write that failed still leaves a valid browser copy. The message names the actual
  * fix (the usual cause is a migration the site owner has not run yet) instead of quietly
- * claiming everything synced.
+ * claiming everything synced, and says so when the save is being retried on its own.
  */
-function annotationSyncHint(error: unknown, scope: AnnotationScope): string {
+function annotationSyncHint(error: unknown, scope: AnnotationScope, retrying = false): string {
   if (isMissingTableError(error)) {
     return scope.kind === 'lesson'
       ? 'Saved in this browser only. Run supabase/migrations/006_lesson_annotations.sql in Supabase to sync lesson notes across devices.'
       : 'Saved in this browser only. Run supabase/migrations/003_pdf_annotations.sql in Supabase to sync annotations across devices.';
   }
   const detail = error instanceof Error ? error.message : '';
-  return detail
-    ? `Saved in this browser only — the account copy could not be updated (${detail}).`
-    : 'Saved in this browser only — the account copy could not be updated.';
+  const tail = detail ? ` (${detail})` : '';
+  return retrying
+    ? `Saved in this browser only — still trying to reach your account${tail}.`
+    : `Saved in this browser only — the account copy could not be updated${tail}.`;
 }
+
+/**
+ * Wait times between automatic retries of a failed account write. Short enough that a minute
+ * of flaky connection does not need user action, long enough not to hammer a project that is
+ * genuinely not reachable; after the last wait the save waits for the next edit, focus,
+ * "online" event or Save press instead.
+ */
+const SAVE_RETRY_DELAYS_MS = [1500, 4000, 10000, 20000, 30000];
 
 export interface PdfAnnotationController {
   bridge: PdfAnnotationBridge;
@@ -125,10 +134,16 @@ export function usePdfAnnotationController({
   /** Changes made in this browser, and the revision already written out. */
   const revisionRef = useRef(0);
   const savedRevisionRef = useRef(0);
+  /** True when a save was asked for while another one was still running. */
+  const queuedSaveRef = useRef(false);
+  /** Automatic retries of a write that failed, so a flaky moment heals itself. */
+  const retryTimerRef = useRef<number | null>(null);
+  const retryAttemptRef = useRef(0);
   /** "Clear all" is the one destructive action that waits for an explicit Save or Undo. */
   const holdAutoSaveRef = useRef(false);
   const persistRef = useRef<(options?: { force?: boolean }) => void>(() => undefined);
   const scheduleRef = useRef<(delay?: number) => void>(() => undefined);
+  const retryRef = useRef<() => void>(() => undefined);
 
   const schedule = useCallback((delay = AUTOSAVE_DELAY_MS) => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
@@ -139,12 +154,40 @@ export function usePdfAnnotationController({
   }, []);
   scheduleRef.current = schedule;
 
+  const clearRetry = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * A failed write keeps being retried by itself. Waiting for the next edit is not enough:
+   * a tab left open after a dropped connection, a sleep/wake on a phone, or a token being
+   * refreshed would otherwise sit on "Unsaved changes" until the user happened to draw again.
+   */
+  const scheduleRetry = useCallback(() => {
+    clearRetry();
+    const attempt = retryAttemptRef.current;
+    if (attempt >= SAVE_RETRY_DELAYS_MS.length) return;
+    retryAttemptRef.current = attempt + 1;
+    retryTimerRef.current = window.setTimeout(() => {
+      retryTimerRef.current = null;
+      persistRef.current();
+    }, SAVE_RETRY_DELAYS_MS[attempt]);
+  }, [clearRetry]);
+  retryRef.current = scheduleRetry;
+
   /** Write the current document to this browser, and to the account when there is one. */
   const persist = useCallback(async (options?: { force?: boolean }) => {
     const key = cacheKeyRef.current;
     if (!key) return;
-    // A save for this PDF is already running; it re-schedules itself if more edits arrive.
-    if (savingRef.current) return;
+    // A save for this PDF is already running: remember that another one was asked for so the
+    // newest document (and an explicit Save press) can never be dropped on the floor.
+    if (savingRef.current) {
+      queuedSaveRef.current = true;
+      return;
+    }
     const unsaved = revisionRef.current !== savedRevisionRef.current || Boolean(cacheRef.current?.pending);
     if (!unsaved && !options?.force) return;
 
@@ -152,7 +195,9 @@ export function usePdfAnnotationController({
     const document: AnnotationDocument = { version: 1, annotations: historyRef.current.annotations };
     const target = scopeRef.current;
     const owner = userIdRef.current;
-    const stamp = Date.now();
+    // The revision this write carries: always newer than anything this device has seen, so a
+    // device whose clock is off can never make its own drawing look older than the stored one.
+    const stamp = nextRevisionStamp(cacheRef.current);
     const entry: AnnotationCacheEntry = {
       data: document,
       localUpdatedAt: stamp,
@@ -165,7 +210,7 @@ export function usePdfAnnotationController({
     if (!target || !owner) {
       // No account copy to write: the browser copy above is the whole story.
       savedRevisionRef.current = revision;
-      historyRef.current.markSaved();
+      historyRef.current.markSaved(document.annotations);
       setSavedAt(stamp);
       setAnnotateStatus(localOnlyNoteRef.current);
       return;
@@ -175,32 +220,51 @@ export function usePdfAnnotationController({
     setSaving(true);
     let succeeded = false;
     try {
-      const updatedAt = await saveCloudAnnotations(owner, target, document);
+      const updatedAt = await saveCloudAnnotations(owner, target, document, stamp);
       succeeded = true;
       if (cacheKeyRef.current === key) {
+        // This write landed last, so its stamp is the revision the account now holds. A newer
+        // write from another device arrives as a realtime event or on the next re-read.
         const saved: AnnotationCacheEntry = { ...entry, pending: false, cloudUpdatedAt: updatedAt };
         cacheRef.current = saved;
         saveAnnotationCache(key, saved);
         savedRevisionRef.current = revision;
-        historyRef.current.markSaved();
+        // Mark only the document that was actually written: edits made while this save was
+        // running are still unsaved and must be written next.
+        historyRef.current.markSaved(document.annotations);
         setSavedAt(updatedAt);
         setAnnotateStatus('');
+        retryAttemptRef.current = 0;
+        clearRetry();
       }
     } catch (error) {
       if (cacheKeyRef.current === key) {
-        setAnnotateStatus(annotationSyncHint(error, target));
+        // Say that a retry is coming while there is one left; after that the next edit, focus,
+        // "online" event or Save press is what pushes the document again.
+        const stillRetrying = retryAttemptRef.current < SAVE_RETRY_DELAYS_MS.length;
+        setAnnotateStatus(annotationSyncHint(error, target, stillRetrying));
       }
-      // The browser copy above is already saved; it is retried on the next change, when the
-      // tab regains focus, when the reader closes, or when the user presses Save.
+      // The browser copy above is already saved; the retry below pushes it again.
     } finally {
       savingRef.current = false;
       setSaving(false);
-      if (succeeded && cacheKeyRef.current === key && revisionRef.current !== savedRevisionRef.current) {
-        // Edits landed while this save was running: write those too.
-        scheduleRef.current(AUTOSAVE_DELAY_MS);
+      if (cacheKeyRef.current === key) {
+        const stillUnsaved = revisionRef.current !== savedRevisionRef.current;
+        const queued = queuedSaveRef.current;
+        queuedSaveRef.current = false;
+        if (!succeeded) {
+          retryRef.current();
+        } else if (queued) {
+          persistRef.current({ force: true });
+        } else if (stillUnsaved) {
+          // Edits landed while this save was running: write those too.
+          scheduleRef.current(AUTOSAVE_DELAY_MS);
+        }
+      } else {
+        queuedSaveRef.current = false;
       }
     }
-  }, []);
+  }, [clearRetry]);
   persistRef.current = (options) => { void persist(options); };
 
   /** Bring in a copy that was saved somewhere else without disturbing unsaved local work. */
@@ -208,7 +272,15 @@ export function usePdfAnnotationController({
     const key = cacheKeyRef.current;
     if (!key) return;
     if (revisionRef.current !== savedRevisionRef.current) return; // local edits win, they are pushed next
-    if (updatedAt <= (cacheRef.current?.cloudUpdatedAt ?? 0)) return; // already have this version
+    const knownCloudUpdatedAt = cacheRef.current?.cloudUpdatedAt ?? 0;
+    if (updatedAt < knownCloudUpdatedAt) return; // an older revision: this browser is ahead
+    if (updatedAt === knownCloudUpdatedAt) {
+      // Same revision. Two devices can build the same stamp if both of their clocks sit
+      // behind the last revision; adopting the account copy then makes both devices agree
+      // instead of each keeping its own version of the same revision.
+      const known = normalizeDocument(cacheRef.current?.data).annotations;
+      if (JSON.stringify(known) === JSON.stringify(document.annotations)) return;
+    }
     historyRef.current.replaceAll(document.annotations);
     savedRevisionRef.current = revisionRef.current;
     const entry: AnnotationCacheEntry = {
@@ -243,6 +315,9 @@ export function usePdfAnnotationController({
     revisionRef.current = 0;
     savedRevisionRef.current = 0;
     holdAutoSaveRef.current = false;
+    queuedSaveRef.current = false;
+    retryAttemptRef.current = 0;
+    clearRetry();
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -319,7 +394,9 @@ export function usePdfAnnotationController({
     if (revisionRef.current === savedRevisionRef.current) return;
     const entry: AnnotationCacheEntry = {
       data: { version: 1, annotations: history.annotations } as AnnotationDocument,
-      localUpdatedAt: Date.now(),
+      // The same monotonic stamp the account write will carry, so a device whose clock is
+      // behind can still tell that these unsaved edits are newer than the stored copy.
+      localUpdatedAt: nextRevisionStamp(cacheRef.current),
       cloudUpdatedAt: cacheRef.current?.cloudUpdatedAt ?? 0,
       pending: Boolean(scopeRef.current),
     };
@@ -351,13 +428,22 @@ export function usePdfAnnotationController({
       else void refreshFromCloud();
     };
     const onFocus = () => { void refreshFromCloud(); };
+    // Back online after a dropped connection: write the pending document straight away
+    // instead of waiting for the retry timer, and pull in anything missed meanwhile.
+    const onOnline = () => {
+      retryAttemptRef.current = 0;
+      flush();
+      void refreshFromCloud();
+    };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('focus', onFocus);
+    window.addEventListener('online', onOnline);
     window.addEventListener('pagehide', flush);
     window.addEventListener('beforeunload', flush);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('focus', onFocus);
+      window.removeEventListener('online', onOnline);
       window.removeEventListener('pagehide', flush);
       window.removeEventListener('beforeunload', flush);
     };
@@ -531,6 +617,8 @@ export function PdfLibraryViewer({
     userId,
     shortcutsEnabled: true,
   });
+  /** True while the account copy could not be written, so the footer never overclaims. */
+  const browserOnly = annotateStatus.startsWith('Saved in this browser');
 
   function requestClose() {
     if (dirtyRef.current) flush();
@@ -584,7 +672,9 @@ export function PdfLibraryViewer({
         <p className="pdf-library-modal-foot">
           {isGuest
             ? <><HardDrive size={13} /> Annotations are saved in this browser. Sign in to sync across devices.</>
-            : <><Cloud size={13} /> Annotations save themselves to your account and appear on every device.</>}
+            : browserOnly
+              ? <><HardDrive size={13} /> Saved in this browser for now — this PDF is not reaching your account yet.</>
+              : <><Cloud size={13} /> Annotations save themselves to your account and appear on every device.</>}
           {!wordHighlights && <span><Info size={13} /> Drag with the Highlight / Marker tool to highlight anywhere on this PDF.</span>}
           {annotateStatus && <span className="pdf-library-modal-foot-note">{annotateStatus}</span>}
         </p>

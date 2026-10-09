@@ -95,6 +95,13 @@ create policy "Users delete their own library PDFs" on public.pdf_library
 
 -- Annotations drawn on library PDFs (highlight, pen, shapes, sticky notes).
 -- One row per PDF; the drawing data lives in the `data` jsonb column.
+--
+-- `updated_at` is the revision stamp of the browser that saved the document (see
+-- `nextRevisionStamp` in src/lib/storage.ts). Leave it exactly as the app writes it: do NOT
+-- add a trigger that replaces it with now(). A database clock that sits behind the newest
+-- revision already stored would move a document's revision backwards, and devices decide
+-- whether an incoming copy is newer by comparing these stamps — a revision that goes
+-- backwards is what makes a device ignore the drawings made on another one.
 create table if not exists public.pdf_annotations (
   pdf_id uuid primary key references public.pdf_library(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -127,6 +134,7 @@ create policy "Users delete their own PDF annotations" on public.pdf_annotations
 
 -- Annotations drawn on a lesson's OWN PDF notes (uploaded straight onto the lesson rather
 -- than into the library): one row per user + video id, same shape of `data` as above.
+-- `updated_at` is the browser's revision stamp here too: see the note above `pdf_annotations`.
 create table if not exists public.lesson_annotations (
   user_id uuid not null references auth.users(id) on delete cascade,
   video_id text not null,

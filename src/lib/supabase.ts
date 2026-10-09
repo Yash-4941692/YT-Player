@@ -5,11 +5,21 @@ import type { LibraryPdf, Subject, VideoRecord } from '../types';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
-export const supabase = supabaseUrl && supabaseAnonKey
-  ? createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = (() => {
+  if (!supabaseUrl || !supabaseAnonKey) return null;
+  try {
+    return createClient(supabaseUrl, supabaseAnonKey, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-    })
-  : null;
+    });
+  } catch (error) {
+    // Creating the client can fail outright — supabase-js needs a WebSocket to exist, and a
+    // malformed project URL throws too. That must not take the whole study room down: the app
+    // keeps working in guest mode (the header then says the library is local) instead of
+    // failing to boot at all.
+    console.warn('Cloud sync is unavailable here:', error instanceof Error ? error.message : error);
+    return null;
+  }
+})();
 
 export const cloudConfigured = Boolean(supabase);
 
@@ -295,6 +305,27 @@ export function isMissingTableError(error: unknown): boolean {
   return /does not exist|schema cache|could not find the table|relation .* does not exist/i.test(message);
 }
 
+/**
+ * Check that the tables annotations sync through actually exist, once per sign-in.
+ *
+ * Without this the reader only finds out when a drawing fails to reach the account, which is
+ * the moment the user is already annoyed. Probing first lets the app name the exact migration
+ * file to run instead of quietly keeping drawings in one browser.
+ */
+export async function probeAnnotationTables(): Promise<{ table: 'pdf_annotations' | 'lesson_annotations'; missing: boolean }[]> {
+  if (!supabase) return [];
+  const probes: { table: 'pdf_annotations' | 'lesson_annotations'; column: string }[] = [
+    { table: 'pdf_annotations', column: 'pdf_id' },
+    { table: 'lesson_annotations', column: 'video_id' },
+  ];
+  const results: { table: 'pdf_annotations' | 'lesson_annotations'; missing: boolean }[] = [];
+  for (const probe of probes) {
+    const { error } = await supabase.from(probe.table).select(probe.column).limit(1);
+    results.push({ table: probe.table, missing: Boolean(error && isMissingTableError(error)) });
+  }
+  return results;
+}
+
 /** Read the saved annotation document for one PDF, or null when there is none yet. */
 export async function fetchCloudAnnotations(
   userId: string,
@@ -316,14 +347,23 @@ export async function fetchCloudAnnotations(
   };
 }
 
-/** Upsert the annotation document for one PDF. Returns the account copy's timestamp. */
+/**
+ * Upsert the annotation document for one PDF. Returns the account copy's stamp: `updated_at`
+ * is the revision other devices compare against, so the caller passes the monotonic stamp it
+ * built from the newest revision it has seen (`nextRevisionStamp`) instead of trusting this
+ * device's clock alone.
+ */
 export async function saveCloudAnnotations(
   userId: string,
   scope: AnnotationScope,
   data: unknown,
+  revisionStamp?: number,
 ): Promise<number> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  const updatedAt = new Date().toISOString();
+  const stamp = Number.isFinite(revisionStamp) && (revisionStamp as number) > 0
+    ? Math.round(revisionStamp as number)
+    : Date.now();
+  const updatedAt = new Date(stamp).toISOString();
   const { error } = await supabase
     .from(annotationTable(scope))
     .upsert(
@@ -331,7 +371,7 @@ export async function saveCloudAnnotations(
       { onConflict: scope.kind === 'library' ? 'pdf_id' : 'user_id,video_id' },
     );
   if (error) throw error;
-  return new Date(updatedAt).getTime();
+  return stamp;
 }
 
 /** Remove the account copy of one PDF's annotations (used when notes are taken off a lesson). */
@@ -357,6 +397,24 @@ export interface AnnotationChange {
 }
 
 /**
+ * Read one realtime event's row into a change, or null when the payload cannot be trusted.
+ *
+ * A realtime event is not guaranteed to carry the whole row: an UPDATE whose `data` column was
+ * stored out of line (a document with a lot of strokes is a large jsonb value) can arrive
+ * without it. Treating that as "this PDF is now empty" would wipe the drawings in every open
+ * reader and push the empty document back to the account, so an unusable payload is reported
+ * as null — the caller then re-reads the row, which always returns every column.
+ */
+export function annotationChangeFromRow(row: unknown): AnnotationChange | null {
+  if (!row || typeof row !== 'object') return null;
+  const record = row as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, 'data')) return null;
+  if (record.data === null || record.data === undefined) return null;
+  const parsed = typeof record.updated_at === 'string' ? new Date(record.updated_at).getTime() : Date.now();
+  return { annotations: record.data, updatedAt: Number.isFinite(parsed) ? parsed : Date.now() };
+}
+
+/**
  * Live updates for one PDF, so a drawing saved on another device appears here without a
  * reload. Returns an unsubscribe function. Projects without the realtime migration (or a
  * table that is not published) simply never receive an event — the reader still refetches
@@ -368,35 +426,47 @@ export function subscribeCloudAnnotations(
   onChange: (change: AnnotationChange | null) => void,
   onUnavailable?: () => void,
 ): () => void {
-  if (!supabase) return () => undefined;
+  const client = supabase;
+  if (!client) return () => undefined;
   const table = annotationTable(scope);
   const topic = `annotations:${table}:${annotationFilter(scope)}:${userId}:${Math.random().toString(36).slice(2, 8)}`;
-  const channel = supabase
-    .channel(topic)
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table, filter: annotationFilter(scope) },
-      (payload: { eventType?: string; new?: Record<string, unknown> | null }) => {
-        if (payload.eventType === 'DELETE') {
-          onChange(null);
-          return;
-        }
-        const row = payload.new ?? {};
-        const updatedAt = typeof row.updated_at === 'string' ? new Date(row.updated_at).getTime() : Date.now();
-        onChange({ annotations: row.data, updatedAt });
-      },
-    );
-  channel.subscribe((status) => {
-    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-      // Usually a table that is not published (or not migrated) yet. Give up quietly instead
-      // of retrying forever: the reader also re-reads when the tab regains focus.
-      onUnavailable?.();
-      if (supabase) void supabase.removeChannel(channel);
-    }
-  });
+  let channel: ReturnType<typeof client.channel> | null = null;
+  try {
+    channel = client
+      .channel(topic)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table, filter: annotationFilter(scope) },
+        (payload: { eventType?: string; new?: Record<string, unknown> | null }) => {
+          if (payload.eventType === 'DELETE') {
+            onChange(null);
+            return;
+          }
+          const change = annotationChangeFromRow(payload.new);
+          // An event without the document (see `annotationChangeFromRow`) means "re-read the
+          // row", never "the PDF is empty".
+          onChange(change);
+        },
+      );
+    channel.subscribe((status) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        // Usually a table that is not published (or not migrated) yet. Give up quietly instead
+        // of retrying forever: the reader also re-reads when the tab regains focus.
+        onUnavailable?.();
+        if (channel) void client.removeChannel(channel);
+      }
+    });
+  } catch (error) {
+    // Opening the realtime connection can fail outright — an environment without WebSocket, a
+    // project with realtime switched off. Live updates are a bonus and the reader re-reads the
+    // account copy when it opens and whenever the tab regains focus, so this must never take
+    // the reader down with it.
+    console.warn('Live annotation updates are unavailable:', error instanceof Error ? error.message : error);
+    onUnavailable?.();
+    return () => undefined;
+  }
   return () => {
-    if (!supabase) return;
-    void supabase.removeChannel(channel);
+    if (channel) void client.removeChannel(channel);
   };
 }
 
