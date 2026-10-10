@@ -4,7 +4,9 @@ const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{10,}$/;
 
 export function parseYouTubeInput(raw: string): Omit<PlayerSource, 'token'> {
-  const value = raw.trim();
+  // Links copied from HTML or a message can retain escaped query separators. Decode
+  // just the HTML ampersand entity before URL parsing so `&amp;list=…` is read normally.
+  const value = raw.trim().replace(/&amp;/gi, '&');
   if (!value) throw new Error('Paste a YouTube video or playlist link to get started.');
 
   let videoId: string | undefined;

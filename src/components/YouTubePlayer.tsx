@@ -180,8 +180,15 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
               lastInfoRef.current = info.videoId;
               callbacksRef.current.onVideoChange(info);
             }
-            if (initialSource.playlistId && (initialSource.playlistIndex ?? 0) > 0) {
-              event.target.loadPlaylist({ list: initialSource.playlistId, listType: 'playlist', index: initialSource.playlistIndex });
+            // Supplying `list` in playerVars is not consistently enough when there is no
+            // videoId (a plain /playlist URL). Explicitly load it once the API is ready;
+            // keep a provided videoId intact when a watch URL points into a playlist.
+            if (initialSource.playlistId && (!initialSource.videoId || (initialSource.playlistIndex ?? 0) > 0)) {
+              event.target.loadPlaylist({
+                list: initialSource.playlistId,
+                listType: 'playlist',
+                index: initialSource.playlistIndex ?? 0,
+              });
             }
             timer = window.setInterval(() => {
               const currentPlayer = playerRef.current;
