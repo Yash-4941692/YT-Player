@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { ListMusic, Play } from 'lucide-react';
 import type { PlayerSource, PlayerVideoInfo } from '../types';
 
 interface VideoData {
@@ -14,6 +15,7 @@ interface YTPlayerInstance {
   getVideoData(): VideoData;
   getPlayerState(): number;
   getPlaylistIndex(): number;
+  getPlaylist(): string[] | null;
   getVolume(): number;
   getIframe(): HTMLIFrameElement;
   playVideo(): void;
@@ -25,6 +27,7 @@ interface YTPlayerInstance {
   isMuted(): boolean;
   loadVideoById(videoId: string | { videoId: string; startSeconds?: number }): void;
   loadPlaylist(options: { list: string; listType: 'playlist'; index?: number }): void;
+  playVideoAt(index: number): void;
   loadModule(module: string): void;
   unloadModule(module: string): void;
   setOption(module: string, option: string, value: unknown): void;
@@ -67,14 +70,9 @@ interface Props {
   onError: (message: string) => void;
 }
 
-/**
- * Privacy-enhanced YouTube host. Using www.youtube-nocookie.com means YouTube does not
- * store viewing cookies until playback starts. Every embed-related URL in this file is
- * built from this one value.
- *
- * ONE-LINE REVERT: if a video that used to play now refuses to play, change the string
- * below back to 'https://www.youtube.com' and nothing else needs to change.
- */
+// Load the IFrame API from YouTube's documented API endpoint. The API itself then
+// creates privacy-enhanced embeds using the `host` option below.
+const YOUTUBE_IFRAME_API_URL = 'https://www.youtube.com/iframe_api';
 const YOUTUBE_EMBED_HOST = 'https://www.youtube-nocookie.com';
 
 let apiPromise: Promise<void> | null = null;
@@ -83,35 +81,69 @@ function loadIframeApi(): Promise<void> {
   if (window.YT?.Player) return Promise.resolve();
   if (apiPromise) return apiPromise;
 
-  apiPromise = new Promise<void>((resolve, reject) => {
-    const apiUrl = `${YOUTUBE_EMBED_HOST}/iframe_api`;
-    const timeout = window.setTimeout(() => reject(new Error('YouTube player took too long to load. Check your connection and try again.')), 18000);
+  const pendingApi = new Promise<void>((resolve, reject) => {
+    let timeout = 0;
+    let script: HTMLScriptElement | null = null;
+    let settled = false;
     const previousReady = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      previousReady?.();
+    const restoreReadyCallback = () => {
+      if (window.onYouTubeIframeAPIReady === onApiReady) {
+        window.onYouTubeIframeAPIReady = previousReady;
+      }
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
       window.clearTimeout(timeout);
+      restoreReadyCallback();
+      script?.remove();
+      reject(new Error(message));
+    };
+    const onApiReady = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      restoreReadyCallback();
+      try {
+        previousReady?.();
+      } catch {
+        // A previously registered callback should not prevent this player from initializing.
+      }
       resolve();
     };
-    let script = document.querySelector<HTMLScriptElement>(`script[src="${apiUrl}"]`);
+
+    window.onYouTubeIframeAPIReady = onApiReady;
+    timeout = window.setTimeout(
+      () => fail('YouTube player took too long to load. Check your connection and try again.'),
+      18000,
+    );
+    script = document.querySelector<HTMLScriptElement>(`script[src="${YOUTUBE_IFRAME_API_URL}"]`);
     if (!script) {
       script = document.createElement('script');
-      script.src = apiUrl;
+      script.src = YOUTUBE_IFRAME_API_URL;
       script.async = true;
-      script.onerror = () => {
-        window.clearTimeout(timeout);
-        reject(new Error('Could not load YouTube. Please check your network connection.'));
-      };
       document.head.appendChild(script);
     }
+    script.onerror = () => fail('Could not load YouTube. Please check your network connection.');
   });
-  return apiPromise;
+
+  apiPromise = pendingApi;
+  // A failed request should not poison every future attempt in this tab.
+  void pendingApi.catch(() => {
+    if (apiPromise === pendingApi) apiPromise = null;
+  });
+  return pendingApi;
 }
 
 function mediaInfo(player: YTPlayerInstance): PlayerVideoInfo | null {
   const data = player.getVideoData();
-  if (!data?.video_id) return null;
+  if (!data?.video_id || data.video_id === 'videoseries') return null;
   const playlistIndex = player.getPlaylistIndex?.() ?? -1;
   return { videoId: data.video_id, title: data.title || '', channel: data.author || '', ...(playlistIndex >= 0 ? { playlistIndex } : {}) };
+}
+
+function samePlaylist(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((videoId, index) => videoId === right[index]);
 }
 
 function friendlyPlayerError(code: number): string {
@@ -133,8 +165,23 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
   const [apiReady, setApiReady] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState('');
+  const [playlistItems, setPlaylistItems] = useState<string[]>([]);
+  const [playlistIndex, setPlaylistIndex] = useState(-1);
+  const [playlistTitles, setPlaylistTitles] = useState<Record<string, string>>({});
 
   callbacksRef.current = { onReady, onStateChange, onVideoChange, onTick, onError };
+  const rememberPlaylistTitle = (info: PlayerVideoInfo | null) => {
+    if (!info?.title) return;
+    setPlaylistTitles((current) => current[info.videoId] === info.title
+      ? current
+      : { ...current, [info.videoId]: info.title });
+  };
+
+  useEffect(() => {
+    setPlaylistItems([]);
+    setPlaylistIndex(-1);
+    setPlaylistTitles({});
+  }, [source.token]);
   const openOnYouTubeUrl = source.videoId
     ? `https://www.youtube.com/watch?v=${encodeURIComponent(source.videoId)}`
     : source.playlistId ? `https://www.youtube.com/playlist?list=${encodeURIComponent(source.playlistId)}` : 'https://www.youtube.com';
@@ -162,10 +209,15 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
         playerVars.listType = 'playlist';
       }
 
+      // The IFrame API is more reliable with a concrete initial embed path. For a
+      // playlist-only URL, `videoseries` is YouTube's special playlist embed endpoint;
+      // the playlist ID itself is then loaded in onReady below.
+      const initialVideoId = initialSource.videoId ?? (initialSource.playlistId ? 'videoseries' : undefined);
       const player = new window.YT.Player(mountRef.current, {
         width: '100%',
         height: '100%',
-        ...(initialSource.videoId ? { videoId: initialSource.videoId } : {}),
+        host: YOUTUBE_EMBED_HOST,
+        ...(initialVideoId ? { videoId: initialVideoId } : {}),
         playerVars,
         events: {
           onReady: (event: YTEvent) => {
@@ -178,16 +230,28 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
             const info = mediaInfo(event.target);
             if (info) {
               lastInfoRef.current = info.videoId;
+              rememberPlaylistTitle(info);
               callbacksRef.current.onVideoChange(info);
             }
-            if (initialSource.playlistId && (initialSource.playlistIndex ?? 0) > 0) {
-              event.target.loadPlaylist({ list: initialSource.playlistId, listType: 'playlist', index: initialSource.playlistIndex });
+            // Supplying `list` in playerVars is not consistently enough when there is no
+            // videoId (a plain /playlist URL). Explicitly load it once the API is ready;
+            // keep a provided videoId intact when a watch URL points into a playlist.
+            if (initialSource.playlistId && (!initialSource.videoId || (initialSource.playlistIndex ?? 0) > 0)) {
+              event.target.loadPlaylist({
+                list: initialSource.playlistId,
+                listType: 'playlist',
+                index: initialSource.playlistIndex ?? 0,
+              });
             }
             timer = window.setInterval(() => {
               const currentPlayer = playerRef.current;
               if (!currentPlayer) return;
-              const currentInfo = mediaInfo(currentPlayer);
+              const currentPlaylist = currentPlayer.getPlaylist?.() ?? [];
+              setPlaylistItems((current) => samePlaylist(current, currentPlaylist) ? current : currentPlaylist);
               const index = currentPlayer.getPlaylistIndex?.() ?? -1;
+              setPlaylistIndex((current) => current === index ? current : index);
+              const currentInfo = mediaInfo(currentPlayer);
+              rememberPlaylistTitle(currentInfo);
               if (currentInfo && (currentInfo.videoId !== lastInfoRef.current || index !== lastPlaylistIndexRef.current)) {
                 lastInfoRef.current = currentInfo.videoId;
                 lastPlaylistIndexRef.current = index;
@@ -201,6 +265,7 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
           onStateChange: (event: YTEvent<number>) => {
             callbacksRef.current.onStateChange(event.data);
             const info = mediaInfo(event.target);
+            if (info) rememberPlaylistTitle(info);
             if (info && info.videoId !== lastInfoRef.current) {
               lastInfoRef.current = info.videoId;
               callbacksRef.current.onVideoChange(info);
@@ -215,10 +280,12 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
           // These named listeners are harmless where supported and improve compatibility with playlist embeds.
           onPlaylistData: (event: YTEvent) => {
             const info = mediaInfo(event.target);
+            if (info) rememberPlaylistTitle(info);
             if (info) callbacksRef.current.onVideoChange(info);
           },
           onPlaylistIndexChange: (event: YTEvent) => {
             const info = mediaInfo(event.target);
+            if (info) rememberPlaylistTitle(info);
             if (info) callbacksRef.current.onVideoChange(info);
           },
         },
@@ -254,23 +321,65 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
   }, [playerReady, source]);
 
   return (
-    <div className="youtube-stage">
-      <div className="youtube-crop">
-        <div className="youtube-inner"><div ref={mountRef} className="youtube-mount" /></div>
+    <>
+      <div className="youtube-stage">
+        <div className="youtube-crop">
+          <div className="youtube-inner"><div ref={mountRef} className="youtube-mount" /></div>
+        </div>
+        {!playerReady && !playerError && (
+          <div className="player-loading" aria-live="polite">
+            <span className="loading-orbit" />
+            <span>{apiReady ? 'Preparing your study room…' : 'Connecting to YouTube…'}</span>
+          </div>
+        )}
+        {playerError && (
+          <div className="player-error" role="alert">
+            <span className="error-mark">!</span>
+            <div><strong>Video unavailable</strong><p>{playerError}</p><a className="player-error-link" href={openOnYouTubeUrl} target="_blank" rel="noreferrer">Open on YouTube <span>↗</span></a></div>
+          </div>
+        )}
       </div>
-      {!playerReady && !playerError && (
-        <div className="player-loading" aria-live="polite">
-          <span className="loading-orbit" />
-          <span>{apiReady ? 'Preparing your study room…' : 'Connecting to YouTube…'}</span>
-        </div>
+      {source.playlistId && (
+        <section className="playlist-picker" aria-label="Playlist video selector">
+          <div className="playlist-picker-heading">
+            <span className="playlist-picker-title"><ListMusic size={15} /> Playlist videos</span>
+            <span className="playlist-picker-count">
+              {playlistItems.length > 0 ? `${playlistItems.length} videos · tap one to play` : 'Loading videos…'}
+            </span>
+          </div>
+          {playlistItems.length > 0 ? (
+            <div className="playlist-picker-list" role="group" aria-label="Choose a video from the playlist">
+              {playlistItems.map((videoId, index) => {
+                const isCurrent = index === playlistIndex;
+                const title = playlistTitles[videoId] || `Video ${index + 1}`;
+                return (
+                  <button
+                    key={`${index}-${videoId}`}
+                    type="button"
+                    className={`playlist-picker-item${isCurrent ? ' current' : ''}`}
+                    aria-label={`Play playlist item ${index + 1}: ${title}`}
+                    aria-pressed={isCurrent}
+                    onClick={() => playerRef.current?.playVideoAt(index)}
+                  >
+                    <span className="playlist-item-number">{isCurrent ? <Play size={13} fill="currentColor" /> : index + 1}</span>
+                    <img src={`https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/mqdefault.jpg`} alt="" loading="lazy" />
+                    <span className="playlist-item-copy">
+                      <span className="playlist-item-title">{title}</span>
+                      <span className="playlist-item-id">{videoId}</span>
+                    </span>
+                    {isCurrent && <span className="playlist-now-playing">NOW PLAYING</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="playlist-picker-empty" aria-live="polite">
+              {playerReady ? 'Waiting for YouTube to provide the playlist…' : 'Connecting to the playlist…'}
+            </p>
+          )}
+        </section>
       )}
-      {playerError && (
-        <div className="player-error" role="alert">
-          <span className="error-mark">!</span>
-          <div><strong>Video unavailable</strong><p>{playerError}</p><a className="player-error-link" href={openOnYouTubeUrl} target="_blank" rel="noreferrer">Open on YouTube <span>↗</span></a></div>
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
