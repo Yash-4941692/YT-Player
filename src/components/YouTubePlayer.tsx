@@ -67,14 +67,9 @@ interface Props {
   onError: (message: string) => void;
 }
 
-/**
- * Privacy-enhanced YouTube host. Using www.youtube-nocookie.com means YouTube does not
- * store viewing cookies until playback starts. Every embed-related URL in this file is
- * built from this one value.
- *
- * ONE-LINE REVERT: if a video that used to play now refuses to play, change the string
- * below back to 'https://www.youtube.com' and nothing else needs to change.
- */
+// Load the IFrame API from YouTube's documented API endpoint. The API itself then
+// creates privacy-enhanced embeds using the `host` option below.
+const YOUTUBE_IFRAME_API_URL = 'https://www.youtube.com/iframe_api';
 const YOUTUBE_EMBED_HOST = 'https://www.youtube-nocookie.com';
 
 let apiPromise: Promise<void> | null = null;
@@ -83,28 +78,58 @@ function loadIframeApi(): Promise<void> {
   if (window.YT?.Player) return Promise.resolve();
   if (apiPromise) return apiPromise;
 
-  apiPromise = new Promise<void>((resolve, reject) => {
-    const apiUrl = `${YOUTUBE_EMBED_HOST}/iframe_api`;
-    const timeout = window.setTimeout(() => reject(new Error('YouTube player took too long to load. Check your connection and try again.')), 18000);
+  const pendingApi = new Promise<void>((resolve, reject) => {
+    let timeout = 0;
+    let script: HTMLScriptElement | null = null;
+    let settled = false;
     const previousReady = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      previousReady?.();
+    const restoreReadyCallback = () => {
+      if (window.onYouTubeIframeAPIReady === onApiReady) {
+        window.onYouTubeIframeAPIReady = previousReady;
+      }
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
       window.clearTimeout(timeout);
+      restoreReadyCallback();
+      script?.remove();
+      reject(new Error(message));
+    };
+    const onApiReady = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      restoreReadyCallback();
+      try {
+        previousReady?.();
+      } catch {
+        // A previously registered callback should not prevent this player from initializing.
+      }
       resolve();
     };
-    let script = document.querySelector<HTMLScriptElement>(`script[src="${apiUrl}"]`);
+
+    window.onYouTubeIframeAPIReady = onApiReady;
+    timeout = window.setTimeout(
+      () => fail('YouTube player took too long to load. Check your connection and try again.'),
+      18000,
+    );
+    script = document.querySelector<HTMLScriptElement>(`script[src="${YOUTUBE_IFRAME_API_URL}"]`);
     if (!script) {
       script = document.createElement('script');
-      script.src = apiUrl;
+      script.src = YOUTUBE_IFRAME_API_URL;
       script.async = true;
-      script.onerror = () => {
-        window.clearTimeout(timeout);
-        reject(new Error('Could not load YouTube. Please check your network connection.'));
-      };
       document.head.appendChild(script);
     }
+    script.onerror = () => fail('Could not load YouTube. Please check your network connection.');
   });
-  return apiPromise;
+
+  apiPromise = pendingApi;
+  // A failed request should not poison every future attempt in this tab.
+  void pendingApi.catch(() => {
+    if (apiPromise === pendingApi) apiPromise = null;
+  });
+  return pendingApi;
 }
 
 function mediaInfo(player: YTPlayerInstance): PlayerVideoInfo | null {
@@ -169,6 +194,7 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
       const player = new window.YT.Player(mountRef.current, {
         width: '100%',
         height: '100%',
+        host: YOUTUBE_EMBED_HOST,
         ...(initialVideoId ? { videoId: initialVideoId } : {}),
         playerVars,
         events: {
