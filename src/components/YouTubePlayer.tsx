@@ -162,10 +162,14 @@ export function YouTubePlayer({ source, controlsRef, onReady, onStateChange, onV
         playerVars.listType = 'playlist';
       }
 
+      // The IFrame API is more reliable with a concrete initial embed path. For a
+      // playlist-only URL, `videoseries` is YouTube's special playlist embed endpoint;
+      // the playlist ID itself is then loaded in onReady below.
+      const initialVideoId = initialSource.videoId ?? (initialSource.playlistId ? 'videoseries' : undefined);
       const player = new window.YT.Player(mountRef.current, {
         width: '100%',
         height: '100%',
-        ...(initialSource.videoId ? { videoId: initialSource.videoId } : {}),
+        ...(initialVideoId ? { videoId: initialVideoId } : {}),
         playerVars,
         events: {
           onReady: (event: YTEvent) => {
