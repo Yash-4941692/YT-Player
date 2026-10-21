@@ -37,9 +37,10 @@ jobs:
         # entries, the head links) and fails the build if any of it is off.
         run: npm run check:app-icon
 
-      - name: Cross-device PDF sync checks
+      - name: Cross-device sync checks
         # Two simulated devices (each its own browser profile, one with a clock that
         # disagrees) must see each other's PDF drawings, including after a failed save.
+        # A deleted lesson must not come back from another device's cached copy either.
         # The tail of the run is also published as an annotation, so a failure can be read
         # straight from the checks list (for example on a phone).
         shell: bash

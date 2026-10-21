@@ -13,6 +13,9 @@
 create table if not exists public.watch_items (
   user_id uuid not null references auth.users(id) on delete cascade,
   video_id text not null,
+  -- Direct video links: 'youtube' lessons play from video_id, 'file' lessons from source_url.
+  source_kind text not null default 'youtube',
+  source_url text,
   title text not null default 'YouTube study session',
   channel text not null default '',
   thumbnail text not null default '',
@@ -33,8 +36,23 @@ create table if not exists public.watch_items (
   pdf_name text,
   pdf_size bigint,
   updated_at timestamptz not null default now(),
+  -- Tombstone for "Delete forever". Kept instead of dropping the row so the other devices,
+  -- which still hold a cached copy of the lesson, can see that it was deleted
+  -- (see supabase/migrations/008_source_links_and_deletes.sql and src/lib/lessonSync.ts).
+  deleted_at timestamptz,
   primary key (user_id, video_id)
 );
+
+create index if not exists watch_items_user_deleted_idx
+  on public.watch_items (user_id, deleted_at)
+  where deleted_at is not null;
+
+-- Same file, re-run on a project created by an older version: `create table if not exists`
+-- above is then skipped, so the columns added later are re-asserted here.
+alter table public.watch_items
+  add column if not exists deleted_at timestamptz,
+  add column if not exists source_kind text not null default 'youtube',
+  add column if not exists source_url text;
 
 alter table public.watch_items enable row level security;
 grant select, insert, update, delete on public.watch_items to authenticated;

@@ -164,6 +164,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .youtube-inner { position: absolute; width: 100%; height: 102.5%; left: 0; top: -2.5%; overflow: hidden; }
 .youtube-mount { position: absolute; inset: 0; width: 100%; height: 100%; }
 .youtube-inner > iframe, .youtube-mount iframe { display: block; width: 100% !important; height: 100% !important; border: 0; }
+/* Direct video links: the browser's own media element fills the same 16:9 stage. */
+.file-stage { display: flex; align-items: center; background: #030306; }
+.file-video { display: block; width: 100%; height: 100%; object-fit: contain; background: #030306; }
+.file-error-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.file-error-retry { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; color: #e7ddff; border: 1px solid rgba(187,161,255,.22); border-radius: 7px; background: rgba(187,161,255,.08); font-size: 10px; font-weight: 700; }
+.file-error-retry:hover { background: rgba(187,161,255,.16); }
+.library-thumb-link { position: absolute; inset: 0; display: grid; place-items: center; color: #8b7fc4; background: radial-gradient(circle at 50% 42%, rgba(148,124,236,.2), rgba(15,15,24,.96) 68%); }
+.library-source-badge { display: inline-flex; align-items: center; padding: 3px 6px; border-radius: 5px; color: #cfc3ff; background: rgba(187,161,255,.12); font: 8px var(--mono); letter-spacing: .06em; }
 .player-loading { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: radial-gradient(ellipse at center, rgba(28, 28, 45, .72), rgba(3, 3, 7, .94)); color: #a09eac; font-size: 11px; }
 .loading-orbit { position: relative; width: 33px; height: 33px; border: 1px solid rgba(161, 145, 255, .16); border-radius: 50%; animation: spin 1.25s linear infinite; }
 .loading-orbit::before { content: ''; position: absolute; top: -2px; left: 13px; width: 5px; height: 5px; border-radius: 50%; background: #b7a2ff; box-shadow: 0 0 12px #9f84ff; }
