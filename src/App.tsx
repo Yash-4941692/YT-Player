@@ -24,6 +24,7 @@ import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfL
 import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
 import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
 import { Analytics } from '@vercel/analytics/react';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import './styles.css';
 import './readability.css';
 
@@ -1342,6 +1343,7 @@ export default function App() {
         />
       )}
       <Analytics />
+      <SpeedInsights />
     </div>
   );
 }
