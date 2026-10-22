@@ -1,6 +1,9 @@
-import type { PersistedState, Subject, VideoRecord } from '../types';
+import type { LessonSourceKind, PersistedState, Subject, VideoRecord } from '../types';
+import { normalizeDeletions, type DeletedMap } from './lessonSync';
 
 const STORAGE_KEY = 'focusframe.jee.v1';
+/** Deletions this browser has already made (see src/lib/lessonSync.ts). */
+const DELETED_KEY = 'focusframe.deleted.v1';
 const PDF_TRASH_KEY = 'focusframe.pdfTrash.v1';
 const PDF_ACTIVITY_KEY = 'focusframe.pdfActivity.v1';
 const PDF_ANNOTATIONS_PREFIX = 'focusframe.pdfAnnotations.v1.';
@@ -20,11 +23,17 @@ function normalizeVideo(value: unknown): VideoRecord | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Partial<VideoRecord>;
   if (typeof item.videoId !== 'string' || !item.videoId) return null;
+  const sourceKind: LessonSourceKind = item.sourceKind === 'file' ? 'file' : 'youtube';
+  const sourceUrl = typeof item.sourceUrl === 'string' && item.sourceUrl ? item.sourceUrl : undefined;
   return {
     videoId: item.videoId,
-    title: typeof item.title === 'string' ? item.title : 'YouTube study session',
+    sourceKind,
+    sourceUrl,
+    title: typeof item.title === 'string' ? item.title : sourceKind === 'file' ? 'Direct video lesson' : 'YouTube study session',
     channel: typeof item.channel === 'string' ? item.channel : '',
-    thumbnail: typeof item.thumbnail === 'string' ? item.thumbnail : `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+    thumbnail: typeof item.thumbnail === 'string'
+      ? item.thumbnail
+      : sourceKind === 'file' ? '' : `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
     playlistId: typeof item.playlistId === 'string' ? item.playlistId : undefined,
     playlistIndex: Number.isInteger(item.playlistIndex) && Number(item.playlistIndex) >= 0 ? Number(item.playlistIndex) : undefined,
     chaptersRaw: typeof item.chaptersRaw === 'string' ? item.chaptersRaw : '',
@@ -32,6 +41,8 @@ function normalizeVideo(value: unknown): VideoRecord | null {
     duration: Number.isFinite(item.duration) ? Number(item.duration) : 0,
     subject: isSubject(item.subject) ? item.subject : 'Other',
     archived: Boolean(item.archived),
+    // A tombstone row is only ever read from the account, never kept in `videos`.
+    deletedAt: Number.isFinite(item.deletedAt) && Number(item.deletedAt) > 0 ? Number(item.deletedAt) : undefined,
     pdfPath: typeof item.pdfPath === 'string' ? item.pdfPath : undefined,
     pdfName: typeof item.pdfName === 'string' ? item.pdfName : undefined,
     pdfSize: Number.isFinite(item.pdfSize) ? Number(item.pdfSize) : undefined,
@@ -45,7 +56,7 @@ export function loadLocalState(): PersistedState {
     if (!serialized) return initialState;
     const parsed = JSON.parse(serialized) as Partial<PersistedState>;
     const videos = Array.isArray(parsed.videos)
-      ? parsed.videos.map(normalizeVideo).filter((item): item is VideoRecord => item !== null)
+      ? parsed.videos.map(normalizeVideo).filter((item): item is VideoRecord => item !== null && !item.deletedAt)
       : [];
     return { videos };
   } catch {
@@ -69,6 +80,31 @@ export function upsertVideo(list: VideoRecord[], record: VideoRecord): VideoReco
   const next = [...list];
   next[index] = record;
   return next.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/* ---------------------------------------------------------------------------
+ * Deletions made on this device.
+ *
+ * Kept next to the library so a lesson deleted here stays deleted even when the account
+ * write has not gone through yet (offline, or a project without the newest migration).
+ * ------------------------------------------------------------------------- */
+
+export function loadLocalDeletions(): DeletedMap {
+  try {
+    const raw = window.localStorage.getItem(DELETED_KEY);
+    if (!raw) return {};
+    return normalizeDeletions(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+export function saveLocalDeletions(deletions: DeletedMap): void {
+  try {
+    window.localStorage.setItem(DELETED_KEY, JSON.stringify(deletions));
+  } catch {
+    // Ignore storage quota errors: the account copy is the important one.
+  }
 }
 
 export function loadLocalPdfTrash(): Record<string, number> {

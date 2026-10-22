@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { newLibraryId } from './pdfLibrary';
-import type { LibraryPdf, Subject, VideoRecord } from '../types';
+import type { LessonSourceKind, LibraryPdf, Subject, VideoRecord } from '../types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -25,6 +25,9 @@ export const cloudConfigured = Boolean(supabase);
 
 interface WatchRow {
   video_id: string;
+  source_kind?: LessonSourceKind | null;
+  source_url?: string | null;
+  deleted_at?: string | null;
   title: string;
   channel: string;
   thumbnail: string;
@@ -42,11 +45,15 @@ interface WatchRow {
 }
 
 function rowToVideo(row: WatchRow): VideoRecord {
+  const sourceKind: LessonSourceKind = row.source_kind === 'file' ? 'file' : 'youtube';
   return {
     videoId: row.video_id,
-    title: row.title || 'YouTube study session',
+    sourceKind,
+    sourceUrl: row.source_url || undefined,
+    deletedAt: row.deleted_at ? new Date(row.deleted_at).getTime() : undefined,
+    title: row.title || (sourceKind === 'file' ? 'Direct video lesson' : 'YouTube study session'),
     channel: row.channel || '',
-    thumbnail: row.thumbnail || `https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg`,
+    thumbnail: row.thumbnail || (sourceKind === 'file' ? '' : `https://i.ytimg.com/vi/${row.video_id}/hqdefault.jpg`),
     playlistId: row.playlist_id || undefined,
     playlistIndex: Number.isInteger(row.playlist_index) && Number(row.playlist_index) >= 0 ? Number(row.playlist_index) : undefined,
     chaptersRaw: row.chapters_raw || '',
@@ -61,12 +68,72 @@ function rowToVideo(row: WatchRow): VideoRecord {
   };
 }
 
-function videoToRow(record: VideoRecord): Omit<WatchRow, 'updated_at'> & { updated_at: string } {
-  return {
+/**
+ * Which optional `watch_items` columns this project has.
+ *
+ * The columns that carry direct video links and cross-device deletions are added by
+ * supabase/migrations/008_source_links_and_deletes.sql. Projects created before that file
+ * exists must keep working, so the app asks once and simply stops sending the columns it
+ * cannot write — a missing column would otherwise reject the whole lesson write.
+ */
+export interface WatchItemCapabilities {
+  /** `deleted_at` — the tombstone that makes a deletion reach the other devices. */
+  deletions: boolean;
+  /** `source_kind` / `source_url` — what a direct video link lesson is played from. */
+  sources: boolean;
+}
+
+const NO_CAPABILITIES: WatchItemCapabilities = { deletions: false, sources: false };
+let capabilitiesPromise: Promise<WatchItemCapabilities> | null = null;
+
+function isMissingColumnError(error: { message?: string; code?: string } | null): boolean {
+  if (!error) return false;
+  // 42703 = undefined_column, PGRST204 = PostgREST column not in its schema cache.
+  if (error.code === '42703' || error.code === 'PGRST204') return true;
+  // A table that does not exist at all (42P01 / PGRST205) supports none of the columns
+  // either — the sign-in error message already tells the owner which file to run.
+  if (error.code === '42P01' || error.code === 'PGRST205') return true;
+  return /column .* does not exist|could not find the '.*' column|could not find the table/i.test(error.message ?? '');
+}
+
+export function watchItemCapabilities(): Promise<WatchItemCapabilities> {
+  if (!supabase) return Promise.resolve(NO_CAPABILITIES);
+  if (!capabilitiesPromise) {
+    const client = supabase;
+    capabilitiesPromise = (async () => {
+      const deletions = await client.from('watch_items').select('deleted_at').limit(1);
+      if (isMissingColumnError(deletions.error)) return NO_CAPABILITIES;
+      const sources = await client.from('watch_items').select('source_kind, source_url').limit(1);
+      return { deletions: true, sources: !isMissingColumnError(sources.error) };
+    })().catch(() => NO_CAPABILITIES);
+  }
+  return capabilitiesPromise;
+}
+
+/** Forget the probed columns (used after the owner runs the migration and reloads). */
+export function resetWatchItemCapabilities(): void {
+  capabilitiesPromise = null;
+}
+
+/**
+ * A captured first frame is a data URL of a few kilobytes. Sending it on every progress tick
+ * would waste mobile data for no reason, so it is only written when it is new: a Postgres
+ * upsert leaves out columns that are not in the payload, so the stored picture is kept.
+ */
+const syncedThumbnails = new Map<string, string>();
+
+function shouldSendThumbnail(record: VideoRecord): boolean {
+  const thumbnail = record.thumbnail || '';
+  // A normal http(s) picture (i.ytimg.com) is tiny and can go with every write.
+  if (!thumbnail.startsWith('data:')) return true;
+  return syncedThumbnails.get(record.videoId) !== thumbnail;
+}
+
+function videoToRow(record: VideoRecord, capabilities: WatchItemCapabilities, includeThumbnail = true): Record<string, unknown> {
+  const row: Record<string, unknown> = {
     video_id: record.videoId,
     title: record.title,
     channel: record.channel,
-    thumbnail: record.thumbnail,
     playlist_id: record.playlistId || null,
     playlist_index: record.playlistIndex ?? null,
     chapters_raw: record.chaptersRaw,
@@ -79,6 +146,16 @@ function videoToRow(record: VideoRecord): Omit<WatchRow, 'updated_at'> & { updat
     pdf_size: record.pdfSize || null,
     updated_at: new Date(record.updatedAt).toISOString(),
   };
+  if (includeThumbnail) row.thumbnail = record.thumbnail;
+  if (capabilities.sources) {
+    row.source_kind = record.sourceKind === 'file' ? 'file' : 'youtube';
+    row.source_url = record.sourceUrl || null;
+  }
+  // `deleted_at` is deliberately never written here. A normal upload must not be able to lift
+  // a tombstone: a device whose cached copy is out of date would otherwise silently bring a
+  // deleted lesson back. Only deleteCloudVideo sets it, and only clearCloudVideoDeletion —
+  // called when the user opens that lesson again — removes it.
+  return row;
 }
 
 export async function fetchCloudVideos(userId: string): Promise<VideoRecord[]> {
@@ -90,20 +167,59 @@ export async function fetchCloudVideos(userId: string): Promise<VideoRecord[]> {
 
 export async function saveCloudVideo(userId: string, record: VideoRecord): Promise<void> {
   if (!supabase) return;
+  const capabilities = await watchItemCapabilities();
+  const includeThumbnail = shouldSendThumbnail(record);
   const { error } = await supabase.from('watch_items').upsert(
-    { ...videoToRow(record), user_id: userId },
+    { ...videoToRow(record, capabilities, includeThumbnail), user_id: userId },
     { onConflict: 'user_id,video_id' },
   );
   if (error) throw error;
+  if (includeThumbnail && record.thumbnail.startsWith('data:')) {
+    syncedThumbnails.set(record.videoId, record.thumbnail);
+  }
 }
 
 /**
- * Delete one lesson row from the account. Used by "Delete forever" in the removed
- * section of the library — "Remove" only archives a lesson and never calls this.
+ * Delete one lesson for good.
+ *
+ * The row is turned into a tombstone (`deleted_at`) instead of being removed: every other
+ * device still holds a cached copy of the lesson, and a missing row cannot tell it that the
+ * lesson was deleted — so it would happily merge its copy back into the account. The
+ * tombstone is the only thing a cached copy cannot survive (see src/lib/lessonSync.ts).
+ *
+ * "Remove" in the library never calls this: that only archives a lesson.
  */
-export async function deleteCloudVideo(userId: string, videoId: string): Promise<void> {
+/**
+ * Lift a lesson's tombstone. Called only when the user deliberately opens a deleted lesson
+ * again — no cached copy is allowed to do this on its own.
+ */
+export async function clearCloudVideoDeletion(userId: string, videoId: string): Promise<void> {
   if (!supabase) return;
-  const { error } = await supabase.from('watch_items').delete().eq('user_id', userId).eq('video_id', videoId);
+  const capabilities = await watchItemCapabilities();
+  if (!capabilities.deletions) return;
+  const { error } = await supabase
+    .from('watch_items')
+    .update({ deleted_at: null, updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .eq('video_id', videoId);
+  if (error) throw error;
+}
+
+export async function deleteCloudVideo(userId: string, videoId: string, deletedAt: number = Date.now()): Promise<void> {
+  if (!supabase) return;
+  const capabilities = await watchItemCapabilities();
+  if (!capabilities.deletions) {
+    // Pre-migration project: fall back to the old hard delete so the lesson at least leaves
+    // the account. The local tombstone still keeps it deleted on this device.
+    const { error } = await supabase.from('watch_items').delete().eq('user_id', userId).eq('video_id', videoId);
+    if (error) throw error;
+    return;
+  }
+  const stamp = new Date(deletedAt).toISOString();
+  const { error } = await supabase.from('watch_items').upsert(
+    { user_id: userId, video_id: videoId, deleted_at: stamp, updated_at: stamp },
+    { onConflict: 'user_id,video_id' },
+  );
   if (error) throw error;
 }
 

@@ -1,6 +1,10 @@
 # Focusframe — JEE Study Player
 
-A responsive YouTube study desk for JEE One Shots: native YouTube playback with your timestamp chapters and PDF notes open side by side. The PDF viewer renders pages on canvas, so notes are readable inline on phones and desktop (no download prompt), and the whole app is built around one screen — video on one side, notes on the other, your library below.
+A responsive study desk for JEE One Shots: watch a YouTube lesson **or any direct video link**, with your timestamp chapters and PDF notes open side by side. The PDF viewer renders pages on canvas, so notes are readable inline on phones and desktop (no download prompt), and the whole app is built around one screen — video on one side, notes on the other, your library below.
+
+**Direct video links:** paste `https://filesto.o2zone.space/d/TnYng8W`, an `.mp4`/`.webm` file, or an HLS `.m3u8` playlist and it streams in the same room — progress, chapters and notes work exactly as they do for YouTube. The browser plays the link directly; nothing is downloaded, proxied or re-hosted. These lessons get a full custom player (the YouTube-style control bar described below), and the video's first frame becomes the lesson thumbnail.
+
+**Rename anything:** every lesson card has a pencil button — rename the lesson and move it to another subject without leaving the library. The new name syncs to your account like everything else.
 
 **PDF library:** signed-in users can upload PDFs to a personal shelf that is not tied to any one lesson. Every PDF is private to the account, can be renamed, tagged by subject, read full screen, downloaded, or attached to the lesson on screen — and it appears on every device they sign in from.
 
@@ -29,6 +33,7 @@ The app now has a **Continue with Google** button. A new user is created automat
    3. [`005_pdf_activity_and_trash.sql`](./supabase/migrations/005_pdf_activity_and_trash.sql) — "Recently deleted" PDFs and per-PDF activity (last opened, page count).
    4. [`006_lesson_annotations.sql`](./supabase/migrations/006_lesson_annotations.sql) — annotations drawn on a **lesson's own PDF notes** (uploaded straight onto a lesson) sync across devices too, plus live updates between devices. Required for lesson notes to sync; the app keeps working locally without it.
    5. [`007_repair_watch_items.sql`](./supabase/migrations/007_repair_watch_items.sql) — **run this one if lessons or their PDFs never reached a second device.** It creates/repairs the `watch_items` table that holds every lesson, its progress, its chapters and the pointer to its PDF notes.
+   6. [`008_source_links_and_deletes.sql`](./supabase/migrations/008_source_links_and_deletes.sql) — **run this one so deletions reach your other devices and direct video links follow your account.** It adds `deleted_at` (the tombstone "Delete forever" writes), `source_kind` and `source_url` to `watch_items`. Without it the app still works, but the header says those two things stay on one device.
 
    > Earlier copies of `schema.sql` wrote the progress column as `current_time`. PostgreSQL treats `CURRENT_TIME` as a reserved word, so that single `CREATE TABLE` statement failed and `watch_items` (and its policies) were never created — every lesson write was then rejected, which is exactly why lessons and the PDFs attached to them did not follow your account to another device. `schema.sql` now quotes that column, and `007_repair_watch_items.sql` repairs a project created by the old file without touching a single row.
 
@@ -102,6 +107,81 @@ Open any PDF from the library to get the full-screen reader with an annotation b
 
 The site and guest mode can be hosted without charge within the current Vercel free plan limits. Supabase and Google have their own free-tier/usage limits, which can change. The app accepts PDFs up to 100 MB, but your Supabase project's upload limit may be lower.
 
+## Deleting a lesson (on every device)
+
+The library has two different actions, and they are deliberately not the same thing:
+
+- **Remove** (the bin icon on a card) only *hides* the lesson: it moves to **Removed** and can be restored from there. It never deletes a PDF that also lives in your PDF library.
+- **Delete forever** (inside **Removed**) is permanent: the lesson's row, its synced drawings and its own PDF notes are deleted, and the stored PDF file is removed from your bucket.
+
+Deleting is the one action a second device cannot see by simply *not finding* something — every
+device keeps a cached copy of the library, and a missing row cannot tell that copy that a lesson
+was deleted. So "delete forever" leaves a **tombstone** (`watch_items.deleted_at`): every
+device reads it, hides the lesson, and never uploads its own copy again. While a tab is open the
+app re-reads the account whenever the tab regains focus and every 40 seconds, so a lesson
+deleted on your phone disappears on your laptop too. Opening that lesson again is the only
+thing that lifts the tombstone. `npm run test:sync` includes a three-device check for exactly
+this (`tools/sync-sim/lesson-delete.mjs`).
+
+The same idea covers the PDF library: **Delete forever** on a PDF removes it for the account,
+and "Recently deleted" is read from the account, so restoring a PDF on one device also takes
+it out of "Recently deleted" on the others.
+
+## Direct video links
+
+Anything that is not a YouTube link is played by the browser's own `<video>` element straight
+from the URL you pasted:
+
+- `.mp4`, `.webm`, `.m4v`, `.mov`, `.ogv` (`.mkv` depends on the browser's codecs),
+- HLS playlists (`.m3u8`) — Safari plays these natively; Chrome, Firefox and Edge get
+  [hls.js](https://github.com/video-dev/hls.js), which is only downloaded when such a link is
+  opened,
+- file-host download links without an extension, such as `https://filesto.o2zone.space/d/TnYng8W`.
+
+### The player
+
+Direct links get a custom control bar (the browser's own `controls` bar is not used, because it
+swallows Space and the arrow keys and cannot preview a frame while scrubbing):
+
+- **play / pause**, the buffered range, and the played range with a draggable knob;
+- **scrub preview** — hover or drag the bar and a small window shows that exact frame and its
+  timestamp, like YouTube. The preview streams the same link; it is created on the first hover
+  and released again after 20 s of no use;
+- **time readout** (`watched / total`), **volume** slider + mute, **playback speed** — the usual
+  0.5×–2× presets plus a **custom** field for anything from 0.1× to 16× (the speed you pick is
+  remembered for your next lesson),
+  **picture-in-picture** (where the browser supports it) and **fullscreen**;
+- single click on the video plays/pauses, double click goes fullscreen, and the bar fades out
+  while playing;
+- **keyboard** works the same way for every lesson: `Space`/`K` play–pause, `←`/`→` seek 5 s in
+  the player (`J`/`L` 10 s), `↑`/`↓` volume, `M` mute, `F` fullscreen, `C` captions,
+  `Home`/`End` jump to the start/end.
+
+### Thumbnails
+
+A YouTube lesson borrows its picture from i.ytimg.com. A direct link has none, so the frame at
+**00:01** is used — a second in, because frame zero is usually a fade-in from black. It is
+produced two ways, so it works on every host:
+
+1. **Captured and saved.** The frame is read with a canvas, shrunk to a small JPEG and stored
+   as the lesson thumbnail (and the player's poster), so it shows on every device. A browser
+   only allows this when the host serves the video with CORS headers.
+2. **Shown live.** When the host does not send those headers (nothing on the page may read its
+   pixels), the card instead holds a paused `<video>` on that same 00:01 frame. Displaying a
+   video is always allowed — only reading it is not — so the thumbnail still appears; it is
+   simply not saved to the account. Such hosts are remembered in the tab, so the app does not
+   keep retrying them for every lesson.
+
+A few things are up to the host, not the app: it has to serve the video **file** (a page with a
+download button cannot be played), it must not require cookies or a Referer header from its own
+site, and playback can be blocked if the host forbids other sites from using the file. If a link
+cannot be played, the player says so and offers **Open the link** and **Try again** instead of a
+blank screen. The link itself is saved with the lesson (`source_url`), so it opens on every
+device you sign in from.
+
+> YouTube lessons keep YouTube's own player, so their keyboard shortcuts work while the YouTube
+> iframe itself has focus. Our shortcuts work whenever the page (not the iframe) has focus.
+
 ## Local development
 
 ```bash
@@ -124,7 +204,9 @@ the thing users actually care about: a drawing made on device A is on device B, 
 way round, for library PDFs and for a lesson's own notes, when a device has an empty cache,
 when both devices keep their own cached copies, and when the first account writes fail
 (`flaky`) and have to be retried. `npm run test:sync` also runs the helper checks for the
-revision stamp and the realtime payload guard.
+revision stamp and the realtime payload guard. A separate helper-level suite covers the
+deletion/reconciliation rules (`src/lib/lessonSync.ts`) and the link parser, and
+`tools/sync-sim/lesson-delete.mjs` simulates three devices around a deleted lesson.
 
 ### The installed-app icon
 
@@ -148,6 +230,7 @@ npm run build:app-icons
 ## Notes
 
 - YouTube videos are embedded/streamed by YouTube; the app does not download or host videos. Some owners disable embedding, in which case the player offers a link to open the video on YouTube.
-- Keyboard shortcuts (when not typing): **Space** play/pause, **← / →** seek 10 seconds, **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions.
+- Direct video links are streamed by the browser from the URL you paste. The app never stores the video file — only the link, its progress, your timestamps and your notes.
+- Keyboard shortcuts (when not typing): **Space** or **K** play/pause, **← / →** seek 10 seconds (**J / L** too), **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions. Inside the custom player the arrows seek 5 seconds, matching the scrubber's own step.
 - There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library (`watch_items` for lesson notes, `pdf_library` for the PDF library).
 - PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, loaded only when a notes panel is opened. Pages render lazily, so large PDFs stay smooth on phones.

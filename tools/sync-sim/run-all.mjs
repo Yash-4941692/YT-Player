@@ -1,7 +1,8 @@
 /**
- * Runs every cross-device sync check: the helper-level checks plus the two-device
- * simulations (fresh devices, devices that keep their cached copies, a lesson's own PDF
- * notes, and a flaky account connection).
+ * Runs every cross-device sync check: the helper-level checks, the two-device simulations
+ * (fresh devices, devices that keep their cached copies, a lesson's own PDF notes, and a
+ * flaky account connection), and the deletion checks (a lesson deleted on one device must
+ * not come back from another device's cached copy).
  *
  *   npm run test:sync
  *
@@ -64,6 +65,14 @@ for (const args of scenarios) {
     console.log(`\nFAIL — scenario "${args.join(' ')}" did not reach the account.`);
     process.exit(1);
   }
+}
+
+// Deletions: three devices, a cached copy that must not resurrect a deleted lesson.
+console.log('\n• deleted lessons (three simulated devices)');
+const deletionCheck = spawnSync(process.execPath, [join(here, 'lesson-delete.mjs')], { cwd: root, stdio: 'inherit' });
+if (deletionCheck.status !== 0) {
+  console.log('\nFAIL — a deleted lesson came back on another device.');
+  process.exit(1);
 }
 
 console.log('\nAll cross-device sync checks passed.');

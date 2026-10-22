@@ -2,26 +2,35 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import type { User } from '@supabase/supabase-js';
 import {
   Archive, ArchiveRestore, ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff,
-  FileText, Film, HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
+  FileText, Film, HardDrive, Info, ListMusic, Pencil, Play, ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
 import { PdfLibraryPanel } from './components/PdfLibraryPanel';
 import { PdfLibraryViewer, usePdfAnnotationController } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
+import { FilePlayer } from './components/FilePlayer';
+import { LessonThumb } from './components/LessonThumb';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
-  cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
+  clearCloudVideoDeletion, cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
   deleteCloudVideo, deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
   isLibraryPath, probeAnnotationTables, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase,
-  trashLibraryPdf, updateLibraryPdf, uploadCloudPdf,
+  trashLibraryPdf, updateLibraryPdf, uploadCloudPdf, watchItemCapabilities,
 } from './lib/supabase';
 import {
-  deleteLocalAnnotations, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState, moveAnnotationCache,
-  saveLocalPdfActivity, saveLocalPdfTrash, saveLocalState, upsertVideo,
+  deleteLocalAnnotations, loadLocalDeletions, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState,
+  moveAnnotationCache, saveLocalDeletions, saveLocalPdfActivity, saveLocalPdfTrash, saveLocalState, upsertVideo,
 } from './lib/storage';
+import {
+  isDeleted, mergeLessonCopies, withDeletion, withoutDeletion, withoutDeletedPdfs, type DeletedMap,
+} from './lib/lessonSync';
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
-import { emptyVideoRecord, formatTime, parseChapters, parseYouTubeInput, youtubeUrlFor } from './lib/youtube';
+import { captureVideoPoster, hostBlocksFrameCapture } from './lib/thumbnails';
+import {
+  emptyVideoRecord, fileLessonId, fileVideoRecord, formatTime, isFileLesson, isYouTubeLink, lessonUrlFor,
+  parseChapters, parseLessonInput,
+} from './lib/youtube';
 import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
 import { Analytics } from '@vercel/analytics/react';
 import './styles.css';
@@ -122,9 +131,22 @@ export default function App() {
   // Names of the annotation tables this project is missing, checked once per sign-in so the
   // app can say which SQL file to run instead of only failing when a drawing is saved.
   const [annotationTablesMissing, setAnnotationTablesMissing] = useState<string[]>([]);
+  // Deletions made here (lesson or PDF id → when). They are the reason a deleted lesson does
+  // not come back from another device's cached copy. See src/lib/lessonSync.ts.
+  const [deletions, setDeletions] = useState<DeletedMap>(loadLocalDeletions);
+  // False until the project has the migration that carries `deleted_at` — the app then says
+  // deletions stay on this device instead of pretending they sync.
+  const [deleteSyncMissing, setDeleteSyncMissing] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
+  const deletionsRef = useRef(deletions);
+  deletionsRef.current = deletions;
+  const libraryPdfsRef = useRef<LibraryPdf[]>([]);
+  const activeVideoIdRef = useRef<string | null>(null);
+  const sourceRef = useRef<PlayerSource | null>(null);
   const libraryMigratedRef = useRef(false);
+  // Lessons whose first frame has already been captured (or attempted) in this tab.
+  const posterAttemptsRef = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timestampsRef = useRef<HTMLDetailsElement>(null);
   const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
@@ -143,6 +165,9 @@ export default function App() {
     () => activeVideoId ? videos.find((video) => video.videoId === activeVideoId) ?? null : null,
     [videos, activeVideoId],
   );
+  activeVideoIdRef.current = activeVideoId;
+  sourceRef.current = source;
+  libraryPdfsRef.current = libraryPdfs;
   const parsedChapters = useMemo(() => parseChapters(chaptersRaw), [chaptersRaw]);
   const activeChapterIndex = useMemo(() => {
     let index = -1;
@@ -154,7 +179,7 @@ export default function App() {
   }, [parsedChapters, currentTime]);
   const sessionPdf = activeVideoId ? notesSessionRef.current[activeVideoId] : undefined;
   const activeSubject = activeRecord?.subject ?? selectedSubject;
-  const activeTitle = activeRecord?.title || (playerReady ? 'YouTube lesson' : 'Your lesson is loading…');
+  const activeTitle = activeRecord?.title || (playerReady ? (source?.kind === 'file' ? 'Direct video lesson' : 'YouTube lesson') : 'Your lesson is loading…');
 
   const linkedLibraryPdf = useMemo(
     () => (activeRecord?.pdfPath ? libraryPdfs.find((item) => item.storagePath && item.storagePath === activeRecord.pdfPath) ?? null : null),
@@ -191,6 +216,10 @@ export default function App() {
   }, [videos]);
 
   useEffect(() => {
+    saveLocalDeletions(deletions);
+  }, [deletions]);
+
+  useEffect(() => {
     saveLocalPdfTrash(pdfTrash);
   }, [pdfTrash]);
 
@@ -219,6 +248,42 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * Push the tombstones this browser made but the account does not have yet (offline deletes,
+   * or a delete the account rejected at the time). Failures are silent: the local tombstone
+   * keeps the lesson deleted here, and the next refresh simply tries again.
+   */
+  const pushPendingLessonDeletes = useCallback((userId: string, pending: { videoId: string; deletedAt: number }[]) => {
+    if (!supabase || pending.length === 0) return;
+    void Promise.allSettled(pending.map((entry) => deleteCloudVideo(userId, entry.videoId, entry.deletedAt)));
+  }, []);
+
+  /**
+   * Reconcile this browser with the account: the single place where copies are merged, both
+   * when the account loads and every time the app checks for changes another device made.
+   */
+  const reconcileLessons = useCallback((userId: string, remoteVideos: VideoRecord[]) => {
+    const result = mergeLessonCopies(videosRef.current, remoteVideos, deletionsRef.current);
+    setVideos(result.videos);
+    setDeletions(result.deletions);
+    // Anything the account already holds (and this device has not changed) needs no upload.
+    for (const [videoId, updatedAt] of Object.entries(result.confirmed)) {
+      if (lastSyncedRef.current.get(videoId) !== updatedAt) lastSyncedRef.current.set(videoId, updatedAt);
+    }
+    pushPendingLessonDeletes(userId, result.pendingDeletes);
+    const openId = activeVideoIdRef.current;
+    if (openId && result.removedIds.includes(openId)) {
+      // Stop the study room when the lesson on screen was deleted elsewhere, so playback
+      // ticks cannot re-create the record that was just removed.
+      setSource(null);
+      setActiveVideoId(null);
+      setPdfPreview(null);
+      setNotesRevision((value) => value + 1);
+      showToast('This lesson was deleted on another device.');
+    }
+    return result;
+  }, [pushPendingLessonDeletes, showToast]);
+
   useEffect(() => {
     if (!cloudConfigured || !authReady || !authUser) {
       setSyncedUserId(null);
@@ -236,15 +301,13 @@ export default function App() {
     fullReconcileRef.current = true;
     (async () => {
       try {
-        const remoteVideos = await fetchCloudVideos(authUser.id);
+        const [remoteVideos, capabilities] = await Promise.all([
+          fetchCloudVideos(authUser.id),
+          watchItemCapabilities(),
+        ]);
         if (cancelled) return;
-        const merged = new Map<string, VideoRecord>();
-        for (const record of remoteVideos) merged.set(record.videoId, record);
-        for (const record of videosRef.current) {
-          const remote = merged.get(record.videoId);
-          if (!remote || record.updatedAt >= remote.updatedAt) merged.set(record.videoId, record);
-        }
-        setVideos([...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt));
+        setDeleteSyncMissing(!capabilities.deletions);
+        reconcileLessons(authUser.id, remoteVideos);
         setSyncedUserId(authUser.id);
         setSyncStatus('synced');
         setSyncMessage('Your study library is synced.');
@@ -255,7 +318,72 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authReady, authUser?.id]);
+  }, [authReady, authUser?.id, reconcileLessons]);
+
+  /**
+   * Apply a fresh library fetch: drop PDFs deleted for good on any device, keep the files
+   * uploaded in this tab while signed out, and retry a delete the account has not accepted.
+   */
+  const applyLibrarySnapshot = useCallback((userId: string, remote: LibraryPdf[]) => {
+    const tombstones = deletionsRef.current;
+    for (const item of remote) {
+      if (isDeleted(tombstones, 'pdf', item.id)) void deleteLibraryPdf(userId, item).catch(() => undefined);
+    }
+    const remoteIds = new Set(remote.map((item) => item.id));
+    setLibraryPdfs((current) => sortLibrary([
+      ...withoutDeletedPdfs(remote, tombstones),
+      ...current.filter((item) => item.sessionOnly),
+    ]));
+    // The reader is closed when the PDF it shows was deleted for good, here or elsewhere.
+    setOpenLibraryPdf((current) => (current && !current.sessionOnly && !remoteIds.has(current.id) ? null : current));
+    // "Recently deleted" entries for PDFs that no longer exist anywhere are dropped.
+    const sessionIds = new Set(libraryPdfsRef.current.filter((item) => item.sessionOnly).map((item) => item.id));
+    setPdfTrash((current) => {
+      let changed = false;
+      const next: Record<string, number> = {};
+      for (const [id, deletedAt] of Object.entries(current)) {
+        if (remoteIds.has(id) || sessionIds.has(id)) next[id] = deletedAt;
+        else changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
+  /**
+   * Give a direct video link a real thumbnail: the first frame, read off the video itself.
+   * A YouTube lesson already has i.ytimg.com for that; a file link has no picture at all, so
+   * its card keeps the link placeholder until this succeeds (it only can when the host serves
+   * the file with CORS headers — see src/lib/thumbnails.ts).
+   */
+  useEffect(() => {
+    const record = activeRecord;
+    if (!record || !isFileLesson(record) || !record.sourceUrl || record.thumbnail) return;
+    if (posterAttemptsRef.current.has(record.videoId)) return;
+    // This host already refused to hand over a frame; its cards show the live 00:01 frame.
+    if (hostBlocksFrameCapture(record.sourceUrl)) return;
+    posterAttemptsRef.current.add(record.videoId);
+    let cancelled = false;
+    // Let the player have the bandwidth first; the capture reads its own small range.
+    const timer = window.setTimeout(() => {
+      void captureVideoPoster(record.sourceUrl as string).then((capture) => {
+        if (cancelled) return;
+        if (capture.dataUrl) {
+          updateVideo(record.videoId, { thumbnail: capture.dataUrl });
+          showToast('Thumbnail saved from 00:01 of the video.');
+          return;
+        }
+        if (capture.blocked) {
+          // The card keeps showing the live 00:01 frame, so nothing looks broken — only the
+          // saved copy that would follow the account is missing.
+          console.info('This host does not allow its video frame to be read (no CORS headers). The library card shows the live 00:01 frame instead.');
+        }
+      });
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeRecord?.videoId, activeRecord?.thumbnail, activeRecord?.sourceUrl, showToast, updateVideo]);
 
   // Load the account-backed PDF library. Guest uploads (session-only) are kept alongside it.
   useEffect(() => {
@@ -273,7 +401,7 @@ export default function App() {
       try {
         const remote = await fetchLibraryPdfs(userId);
         if (cancelled) return;
-        setLibraryPdfs((current) => sortLibrary([...remote, ...current.filter((item) => item.sessionOnly)]));
+        applyLibrarySnapshot(userId, remote);
         setLibraryError('');
       } catch (error) {
         if (cancelled) return;
@@ -329,7 +457,17 @@ export default function App() {
       if (cancelled) return;
       if (trashResult.status === 'fulfilled') {
         const remoteTrash = Object.fromEntries(trashResult.value.map((entry) => [entry.pdfId, entry.deletedAt]));
-        setPdfTrash((current) => ({ ...current, ...remoteTrash }));
+        // The account is the source of truth for cloud PDFs: a PDF restored on another device
+        // has no `pdf_trash` row there, and merging the two lists as a union would keep showing
+        // it in "Recently deleted" here forever. Only this tab's guest uploads keep their entry.
+        setPdfTrash((current) => {
+          const sessionIds = new Set(libraryPdfsRef.current.filter((item) => item.sessionOnly).map((item) => item.id));
+          const kept: Record<string, number> = {};
+          for (const [id, deletedAt] of Object.entries(current)) {
+            if (sessionIds.has(id)) kept[id] = deletedAt;
+          }
+          return { ...kept, ...remoteTrash };
+        });
         setTrashUnavailable(false);
       } else {
         setTrashUnavailable(true);
@@ -411,6 +549,36 @@ export default function App() {
     }, 1100);
     return () => window.clearTimeout(timeout);
   }, [videos, authUser?.id, syncedUserId]);
+
+  /**
+   * Another device can delete a lesson or a PDF while this tab is open. A row that simply
+   * disappears cannot tell a cached copy that anything changed, so the app re-reads the
+   * account whenever the tab regains focus and every 40 s while it is visible.
+   */
+  useEffect(() => {
+    if (!supabase || !authUser || syncedUserId !== authUser.id) return;
+    const userId = authUser.id;
+    let stopped = false;
+    const refresh = () => {
+      if (stopped || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) return;
+      void fetchCloudVideos(userId)
+        .then((remote) => { if (!stopped) reconcileLessons(userId, remote); })
+        .catch(() => undefined);
+      void fetchLibraryPdfs(userId)
+        .then((remote) => { if (!stopped) applyLibrarySnapshot(userId, remote); })
+        .catch(() => undefined);
+    };
+    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibility);
+    const timer = window.setInterval(refresh, 40000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [authUser?.id, syncedUserId, reconcileLessons, applyLibrarySnapshot]);
 
   useEffect(() => {
     if (!activeVideoId) return;
@@ -520,12 +688,16 @@ export default function App() {
 
   const handlePlayerVideoChange = useCallback((info: PlayerVideoInfo) => {
     const existing = videosRef.current.find((video) => video.videoId === info.videoId);
-    const record = existing ?? emptyVideoRecord(info.videoId, selectedSubject);
+    const kind = sourceRef.current?.kind === 'file' ? 'file' : existing?.sourceKind === 'file' ? 'file' : 'youtube';
+    const record = existing ?? emptyVideoRecord(info.videoId, selectedSubject, kind);
     const updated: VideoRecord = {
       ...record,
+      sourceKind: kind,
+      sourceUrl: kind === 'file' ? (record.sourceUrl || sourceRef.current?.fileUrl) : undefined,
       title: info.title || record.title,
       channel: info.channel || record.channel,
-      thumbnail: `https://i.ytimg.com/vi/${info.videoId}/hqdefault.jpg`,
+      // Only a YouTube lesson has a thumbnail that can be derived from its id.
+      thumbnail: kind === 'file' ? record.thumbnail : `https://i.ytimg.com/vi/${info.videoId}/hqdefault.jpg`,
       playlistId: playlistIdRef.current || record.playlistId,
       playlistIndex: info.playlistIndex ?? record.playlistIndex,
       archived: false,
@@ -558,13 +730,20 @@ export default function App() {
     }
   }, [activeVideoId, updateVideo]);
 
+  /**
+   * Open a lesson from whatever was pasted: a YouTube video/playlist link or a direct video
+   * link (`.mp4`, an HLS playlist, a file-host download link…). Both kinds are saved in the
+   * same library, keep their own progress, timestamps and notes, and follow the account.
+   */
   function loadYouTubeVideo(event?: FormEvent<HTMLFormElement>, urlOverride?: string, subjectOverride?: Subject) {
     event?.preventDefault();
     setUrlError('');
     setPlayerError('');
     const value = urlOverride ?? urlInput;
     try {
-      const parsed = parseYouTubeInput(value);
+      const parsed = parseLessonInput(value);
+      const isFile = parsed.kind === 'file' && Boolean(parsed.fileUrl);
+      const videoId = isFile ? fileLessonId(parsed.fileUrl as string) : parsed.videoId;
       playlistIdRef.current = parsed.playlistId;
       setIsPlaylist(Boolean(parsed.playlistId));
       setPlayerReady(Boolean(playerControlsRef.current));
@@ -576,16 +755,38 @@ export default function App() {
       setPdfError('');
       setNotesExpanded(false);
       setUrlInput(value);
+
       let startPlaylistIndex: number | undefined;
-      if (parsed.videoId) {
-        const existing = videosRef.current.find((video) => video.videoId === parsed.videoId);
-        const record = existing ?? emptyVideoRecord(parsed.videoId, subjectOverride ?? selectedSubject);
+      let startSeconds: number | undefined;
+      if (videoId) {
+        const existing = videosRef.current.find((video) => video.videoId === videoId);
+        // Opening a lesson that was deleted — here or on another device — is the one thing
+        // that lifts its tombstone. A cached copy alone never does (see lessonSync.ts).
+        const wasDeleted = isDeleted(deletionsRef.current, 'lesson', videoId);
+        if (wasDeleted) {
+          setDeletions((current) => withoutDeletion(current, 'lesson', videoId));
+          deletionsRef.current = withoutDeletion(deletionsRef.current, 'lesson', videoId);
+          lastSyncedRef.current.delete(videoId);
+        }
+        const record: VideoRecord = existing ?? (isFile
+          ? fileVideoRecord(parsed.fileUrl as string, subjectOverride ?? selectedSubject)
+          : emptyVideoRecord(videoId, subjectOverride ?? selectedSubject));
         startPlaylistIndex = record.playlistIndex;
+        startSeconds = record.currentTime > 3 ? record.currentTime : undefined;
         if (!existing) setVideos((current) => upsertVideo(current, record));
         else if (record.archived) updateVideo(record.videoId, { archived: false });
-        setActiveVideoId(parsed.videoId);
+        if (wasDeleted && authUser && supabase) {
+          // Clear the account tombstone straight away, so a refresh cannot hide it again
+          // while the debounced library upload is still waiting.
+          const revived: VideoRecord = { ...record, updatedAt: Date.now() };
+          void clearCloudVideoDeletion(authUser.id, videoId)
+            .then(() => saveCloudVideo(authUser.id, revived))
+            .then(() => lastSyncedRef.current.set(videoId, revived.updatedAt))
+            .catch(() => undefined);
+        }
+        setActiveVideoId(videoId);
         setChaptersRaw(record.chaptersRaw || '');
-        setPanelView(record.pdfPath || notesSessionRef.current[parsed.videoId] ? 'notes' : parseChapters(record.chaptersRaw || '').length > 0 ? 'timestamps' : 'notes');
+        setPanelView(record.pdfPath || notesSessionRef.current[videoId] ? 'notes' : parseChapters(record.chaptersRaw || '').length > 0 ? 'timestamps' : 'notes');
         if (record.currentTime > 3) window.setTimeout(() => playerControlsRef.current?.seekTo(record.currentTime), 500);
       } else {
         setActiveVideoId(null);
@@ -593,15 +794,38 @@ export default function App() {
         setPanelView('notes');
       }
       loadTokenRef.current += 1;
-      setSource({ ...parsed, ...(startPlaylistIndex !== undefined ? { playlistIndex: startPlaylistIndex } : {}), token: loadTokenRef.current });
+      const token = loadTokenRef.current;
+      if (isFile) {
+        setSource({
+          kind: 'file',
+          videoId,
+          fileUrl: parsed.fileUrl,
+          startSeconds,
+          token,
+        });
+      } else {
+        setSource({
+          kind: 'youtube',
+          videoId: parsed.videoId,
+          playlistId: parsed.playlistId,
+          ...(startPlaylistIndex !== undefined ? { playlistIndex: startPlaylistIndex } : {}),
+          token,
+        });
+      }
     } catch (error) {
-      setUrlError(error instanceof Error ? error.message : 'Please paste a YouTube video or playlist link.');
+      setUrlError(error instanceof Error ? error.message : 'Please paste a YouTube link or a direct video link.');
     }
   }
 
   function resumeVideo(record: VideoRecord) {
     setSelectedSubject(record.subject);
-    const url = youtubeUrlFor(record.videoId, record.playlistId);
+    if (isFileLesson(record) && !record.sourceUrl) {
+      // Only possible on a project without the newest migration: the link itself was never
+      // stored, so the lesson cannot be reopened from its hash alone.
+      showToast('This lesson has no saved link. Paste the video link again to reopen it.');
+      return;
+    }
+    const url = lessonUrlFor(record);
     setUrlInput(url);
     loadYouTubeVideo(undefined, url, record.subject);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -622,6 +846,14 @@ export default function App() {
     if (state === 0 && activeVideoId) {
       updateVideo(activeVideoId, { currentTime: playerDuration || activeRecord?.duration || 0 });
     }
+  }
+
+  /** Rename a lesson (and move it to another subject). Saves to the browser and the account. */
+  function renameVideo(record: VideoRecord, title: string, subject: Subject) {
+    const nextTitle = title.trim().slice(0, 160);
+    if (!nextTitle) return;
+    updateVideo(record.videoId, { title: nextTitle, subject });
+    showToast('Lesson renamed.');
   }
 
   function archiveVideo(record: VideoRecord) {
@@ -742,6 +974,9 @@ export default function App() {
   /** "Delete forever": removes the file from storage and the row from the library. */
   async function deleteLibraryItemForever(item: LibraryPdf) {
     setLibraryError('');
+    // Remembered locally so the PDF cannot come back from another device's stale list while
+    // (or if) the account delete is not accepted. `applyLibrarySnapshot` retries it.
+    setDeletions((current) => withDeletion(current, 'pdf', item.id, Date.now()));
     if (!item.sessionOnly && authUser && supabase) {
       setLibraryBusy(true);
       try {
@@ -985,6 +1220,13 @@ export default function App() {
   async function deleteVideoForever(record: VideoRecord) {
     const keepLibraryPdf = pdfLinkedFromLibrary(record.pdfPath);
     const removesLessonPdf = Boolean(record.pdfPath) && !keepLibraryPdf;
+    const deletedAt = Date.now();
+
+    // The tombstone is written here first, on purpose: even if the account write below fails
+    // (offline, or an older project), this device must never merge the lesson back. The
+    // sign-in / focus refresh retries the account write for every pending tombstone.
+    setDeletions((current) => withDeletion(current, 'lesson', record.videoId, deletedAt));
+    lastSyncedRef.current.delete(record.videoId);
 
     setLibraryError('');
     if (authUser && supabase) {
@@ -997,11 +1239,11 @@ export default function App() {
       }
       setLibraryBusy(true);
       try {
-        await deleteCloudVideo(authUser.id, record.videoId);
+        await deleteCloudVideo(authUser.id, record.videoId, deletedAt);
       } catch (error) {
-        setLibraryBusy(false);
-        setLibraryError(error instanceof Error ? error.message : 'Could not delete this lesson from your account.');
-        return;
+        // Keep the lesson deleted here and retry later; say so instead of making it reappear.
+        console.warn('Could not remove this lesson from the account yet:', error);
+        showToast('Deleted here. Your account was unreachable, so it will retry automatically.');
       }
       setLibraryBusy(false);
     }
@@ -1028,13 +1270,21 @@ export default function App() {
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, button, a, summary, [role="button"], [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      // Never while typing.
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      // A button, link or disclosure that is not part of the player keeps its own keys
+      // (Space activates it). Inside the player card the shortcuts always win, so clicking a
+      // control and then pressing Space still plays and pauses instead of doing nothing.
+      if (!target?.closest('.player-card') && target?.closest('button, a, summary, [role="button"]')) return;
       const controls = playerControlsRef.current;
       if (!controls || !activeVideoId) return;
       const key = event.key.toLowerCase();
-      if (event.code === 'Space') { event.preventDefault(); controls.togglePlayback(); }
+      if (event.code === 'Space' || key === 'k') { event.preventDefault(); controls.togglePlayback(); }
       else if (key === 'arrowleft') { event.preventDefault(); controls.seekBy(-10); }
       else if (key === 'arrowright') { event.preventDefault(); controls.seekBy(10); }
+      else if (key === 'j') { event.preventDefault(); controls.seekBy(-10); }
+      else if (key === 'l') { event.preventDefault(); controls.seekBy(10); }
       else if (key === 'arrowup') { event.preventDefault(); controls.adjustVolume(5); }
       else if (key === 'arrowdown') { event.preventDefault(); controls.adjustVolume(-5); }
       else if (key === 'f') { event.preventDefault(); controls.toggleFullscreen(); }
@@ -1048,17 +1298,24 @@ export default function App() {
   const progress = activeRecord ? progressPercent({ ...activeRecord, currentTime, duration: playerDuration || activeRecord.duration }) : 0;
   const watched = formatTime(currentTime);
 
+  const urlHelperLabel = useMemo(() => {
+    const value = urlInput.trim();
+    if (!value) return 'YOUTUBE';
+    if (isYouTubeLink(value)) return 'YOUTUBE';
+    return /^https?:\/\//i.test(value) ? 'VIDEO LINK' : 'LINK';
+  }, [urlInput]);
+
   const loadForm = (
     <form className="video-load-form" onSubmit={(event) => loadYouTubeVideo(event)}>
       <div className="url-input-wrap">
         <span className="url-play-icon"><Play size={15} fill="currentColor" /></span>
         <input
-          aria-label="YouTube video or playlist URL"
+          aria-label="YouTube video, playlist or direct video link"
           value={urlInput}
           onChange={(event) => { setUrlInput(event.target.value); setUrlError(''); }}
-          placeholder="Paste a YouTube one-shot or playlist link…"
+          placeholder="Paste a YouTube link, or any direct video link…"
         />
-        <span className="url-helper">YOUTUBE</span>
+        <span className="url-helper">{urlHelperLabel}</span>
       </div>
       <label className="subject-select-label">
         <span className="sr-only">Subject</span>
@@ -1101,6 +1358,17 @@ export default function App() {
           </div>
         </header>
 
+        {deleteSyncMissing && (
+          <p className="cloud-warning annotation-sync-warning" role="status">
+            <CloudOff size={14} />
+            <span className="annotation-sync-warning-text">
+              Deleted lessons and direct video links are only kept in this browser: this Supabase project is missing the
+              newest lesson columns. Run <code>supabase/migrations/008_source_links_and_deletes.sql</code> in Supabase →
+              SQL Editor, then reload this page so deletions and video links follow your account.
+            </span>
+          </p>
+        )}
+
         {annotationTablesMissing.length > 0 && (
           <p className="cloud-warning annotation-sync-warning" role="status">
             <CloudOff size={14} />
@@ -1117,7 +1385,7 @@ export default function App() {
               <div className="hero-copy">
                 <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
                 <h1>Your JEE one-shots,<br className="desktop-break" /> with your <em>notes open.</em></h1>
-                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device.</p>
+                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. YouTube links and direct video links both work.</p>
               </div>
               {loadForm}
               {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
@@ -1138,7 +1406,7 @@ export default function App() {
                   <div className="welcome-icon mint"><Film size={20} /></div>
                   <span className="welcome-number">01</span>
                   <h3>Paste a lesson</h3>
-                  <p>Any YouTube one-shot or playlist starts the room.</p>
+                  <p>A YouTube one-shot, a playlist, or any direct video link starts the room.</p>
                 </article>
                 <article className="welcome-card">
                   <div className="welcome-icon lavender"><ListMusic size={20} /></div>
@@ -1158,23 +1426,36 @@ export default function App() {
           )}
 
           {source && (
-            <section className={`workspace ${notesExpanded ? 'notes-expanded' : ''}`} aria-label="YouTube study room">
+            <section className={`workspace ${notesExpanded ? 'notes-expanded' : ''}`} aria-label="Study room">
               <article className="player-card glass-card workspace-player">
-                <div className="player-topline"><div className="player-live-label"><span className="live-dot" /> STUDY ROOM <span className="topline-slash">/</span> <span>{isPlaylist ? 'PLAYLIST' : 'NOW PLAYING'}</span></div><div className={`player-state ${playerError ? 'error' : playerState === 1 ? 'playing' : ''}`}><span />{playerError ? 'Check video details' : playerState === 1 ? 'In session' : playerReady ? 'Ready when you are' : 'Connecting'}</div></div>
-                <YouTubePlayer
-                  source={source}
-                  controlsRef={playerControlsRef}
-                  onReady={onPlayerReady}
-                  onStateChange={onPlayerStateChange}
-                  onVideoChange={handlePlayerVideoChange}
-                  onTick={handlePlayerTick}
-                  onError={onPlayerError}
-                />
+                <div className="player-topline"><div className="player-live-label"><span className="live-dot" /> STUDY ROOM <span className="topline-slash">/</span> <span>{source?.kind === 'file' ? 'DIRECT VIDEO' : isPlaylist ? 'PLAYLIST' : 'NOW PLAYING'}</span></div><div className={`player-state ${playerError ? 'error' : playerState === 1 ? 'playing' : ''}`}><span />{playerError ? 'Check video details' : playerState === 1 ? 'In session' : playerReady ? 'Ready when you are' : 'Connecting'}</div></div>
+                {source.kind === 'file' ? (
+                  <FilePlayer
+                    source={source}
+                    poster={activeRecord?.thumbnail || undefined}
+                    controlsRef={playerControlsRef}
+                    onReady={onPlayerReady}
+                    onStateChange={onPlayerStateChange}
+                    onVideoChange={handlePlayerVideoChange}
+                    onTick={handlePlayerTick}
+                    onError={onPlayerError}
+                  />
+                ) : (
+                  <YouTubePlayer
+                    source={source}
+                    controlsRef={playerControlsRef}
+                    onReady={onPlayerReady}
+                    onStateChange={onPlayerStateChange}
+                    onVideoChange={handlePlayerVideoChange}
+                    onTick={handlePlayerTick}
+                    onError={onPlayerError}
+                  />
+                )}
                 <div className="player-meta">
                   <div className="player-title-wrap">
                     <span className={`subject-tag ${subjectClass(activeSubject)}`}>{activeSubject}</span>
                     <h2>{activeTitle}</h2>
-                    <p>{activeRecord?.channel || 'YouTube study session'} <span>·</span> {playerDuration ? formatTime(playerDuration) : 'Duration appears when the video is ready'}</p>
+                    <p>{activeRecord?.channel || (isFileLesson(activeRecord) ? 'Direct video link' : 'YouTube study session')} <span>·</span> {playerDuration ? formatTime(playerDuration) : 'Duration appears when the video is ready'}</p>
                   </div>
                   <div className="player-meta-actions">
                     <span className="watch-time"><span>WATCHED</span><strong>{watched}{playerDuration ? ` / ${formatTime(playerDuration)}` : ''}</strong></span>
@@ -1184,7 +1465,7 @@ export default function App() {
                 <div className="player-progress"><span style={{ width: `${progress}%` }} /></div>
                 <details className="shortcut-disclosure">
                   <summary><span><Zap size={15} /> Keyboard shortcuts</span><span className="shortcut-summary-action">Show <ChevronDown size={15} /></span></summary>
-                  <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
+                  <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>J</kbd><kbd>L</kbd><small>±10s</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
                 </details>
               </article>
 
@@ -1308,10 +1589,18 @@ export default function App() {
                         onResume={() => resumeVideo(video)}
                         onRestore={() => restoreVideo(video)}
                         onDeleteForever={() => void deleteVideoForever(video)}
+                        onRename={(title, subject) => renameVideo(video, title, subject)}
                       />
                     ))
                   : filteredLibrary.map((video) => (
-                      <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
+                      <LibraryCard
+                        key={video.videoId}
+                        video={video}
+                        active={video.videoId === activeVideoId}
+                        onResume={() => resumeVideo(video)}
+                        onRemove={() => archiveVideo(video)}
+                        onRename={(title, subject) => renameVideo(video, title, subject)}
+                      />
                     ))}
                 {!showingRemoved && filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
                 {showingRemoved && removedVideos.length === 0 && <div className="library-empty">Nothing has been removed.</div>}
@@ -1319,7 +1608,7 @@ export default function App() {
             </section>
           )}
 
-          <footer className="footer"><a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a><p>Made for your next breakthrough. Videos are streamed by YouTube.</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a></footer>
+          <footer className="footer"><a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a><p>Made for your next breakthrough. Videos are streamed by YouTube or by the link you paste.</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a></footer>
         </main>
       </div>
       <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />
@@ -1355,38 +1644,101 @@ interface LibraryCardProps {
   onRemove?: () => void;
   onRestore?: () => void;
   onDeleteForever?: () => void;
+  /** Rename a lesson and/or move it to another subject. */
+  onRename?: (title: string, subject: Subject) => void;
 }
 
-function LibraryCard({ video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever }: LibraryCardProps) {
+function LibraryCard({
+  video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
+}: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(video.title);
+  const [draftSubject, setDraftSubject] = useState<Subject>(video.subject);
+
+  function startEditing() {
+    setDraftTitle(video.title);
+    setDraftSubject(video.subject);
+    setEditing(true);
+  }
+
+  function save() {
+    const title = draftTitle.trim();
+    if (!title) return;
+    onRename?.(title, draftSubject);
+    setEditing(false);
+  }
+
   return (
-    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''}`}>
-      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}>
-        <img src={video.thumbnail} alt="" loading="lazy" />
+    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''} ${editing ? 'library-card-editing' : ''}`}>
+      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`} tabIndex={editing ? -1 : 0}>
+        {/* A saved picture, or the clip's own 00:01 frame, or the link placeholder. */}
+        <LessonThumb video={video} still={removed} />
         <span className="library-play"><Play size={14} fill="currentColor" /></span>
         <span className="library-duration">{video.duration ? formatTime(video.duration) : video.subject}</span>
         {active && <span className="library-live">OPEN NOW</span>}
       </button>
       <div className="library-card-body">
         <div className="library-card-overline">
-          <span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span>
+          <span className={`subject-tag ${subjectClass(editing ? draftSubject : video.subject)}`}>{editing ? draftSubject : video.subject}</span>
           <span className="library-card-tools">
-            {video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
-            {!removed && (
+            {!editing && video.sourceKind === 'file' && <span className="library-source-badge" title={video.sourceUrl || 'Direct video link'}>LINK</span>}
+            {!editing && video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
+            {!editing && onRename && (
+              <button className="library-rename-button" onClick={startEditing} aria-label={`Rename ${video.title}`} title="Rename lesson"><Pencil size={13} /></button>
+            )}
+            {!editing && !removed && (
               <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
             )}
           </span>
         </div>
-        <button className="library-video-title" onClick={onResume}>{video.title}</button>
-        <p>{video.channel || 'YouTube lesson'}</p>
-        <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-        {removed ? (
-          <div className="library-removed-actions">
-            <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
-            <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
-          </div>
+
+        {editing ? (
+          <form
+            className="library-rename"
+            onSubmit={(event) => { event.preventDefault(); save(); }}
+          >
+            <label className="library-rename-field">
+              <span className="sr-only">Lesson title</span>
+              <input
+                value={draftTitle}
+                onChange={(event) => setDraftTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') { event.preventDefault(); save(); }
+                  if (event.key === 'Escape') { event.preventDefault(); setEditing(false); }
+                }}
+                // Focused on open so typing a new name works straight away.
+                autoFocus
+                maxLength={160}
+                placeholder="Lesson title"
+              />
+            </label>
+            <div className="library-rename-row">
+              <select
+                value={draftSubject}
+                onChange={(event) => setDraftSubject(event.target.value as Subject)}
+                aria-label="Subject"
+              >
+                {subjects.map((subject) => <option key={subject}>{subject}</option>)}
+              </select>
+              <button type="submit" className="library-rename-save"><Check size={13} /> Save</button>
+              <button type="button" className="library-rename-cancel" onClick={() => setEditing(false)} aria-label="Cancel rename"><X size={13} /></button>
+            </div>
+          </form>
         ) : (
-          <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+          <>
+            <button className="library-video-title" onClick={onResume} title={video.title}>{video.title}</button>
+            <p>{video.channel || (video.sourceKind === 'file' ? 'Direct video link' : 'YouTube lesson')}</p>
+            <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
+            {removed ? (
+              <div className="library-removed-actions">
+                <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
+                <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
+              </div>
+            ) : (
+              <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+            )}
+          </>
         )}
       </div>
     </article>
