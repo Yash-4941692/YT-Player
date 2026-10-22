@@ -115,12 +115,25 @@ export function resetWatchItemCapabilities(): void {
   capabilitiesPromise = null;
 }
 
-function videoToRow(record: VideoRecord, capabilities: WatchItemCapabilities): Record<string, unknown> {
+/**
+ * A captured first frame is a data URL of a few kilobytes. Sending it on every progress tick
+ * would waste mobile data for no reason, so it is only written when it is new: a Postgres
+ * upsert leaves out columns that are not in the payload, so the stored picture is kept.
+ */
+const syncedThumbnails = new Map<string, string>();
+
+function shouldSendThumbnail(record: VideoRecord): boolean {
+  const thumbnail = record.thumbnail || '';
+  // A normal http(s) picture (i.ytimg.com) is tiny and can go with every write.
+  if (!thumbnail.startsWith('data:')) return true;
+  return syncedThumbnails.get(record.videoId) !== thumbnail;
+}
+
+function videoToRow(record: VideoRecord, capabilities: WatchItemCapabilities, includeThumbnail = true): Record<string, unknown> {
   const row: Record<string, unknown> = {
     video_id: record.videoId,
     title: record.title,
     channel: record.channel,
-    thumbnail: record.thumbnail,
     playlist_id: record.playlistId || null,
     playlist_index: record.playlistIndex ?? null,
     chapters_raw: record.chaptersRaw,
@@ -133,6 +146,7 @@ function videoToRow(record: VideoRecord, capabilities: WatchItemCapabilities): R
     pdf_size: record.pdfSize || null,
     updated_at: new Date(record.updatedAt).toISOString(),
   };
+  if (includeThumbnail) row.thumbnail = record.thumbnail;
   if (capabilities.sources) {
     row.source_kind = record.sourceKind === 'file' ? 'file' : 'youtube';
     row.source_url = record.sourceUrl || null;
@@ -154,11 +168,15 @@ export async function fetchCloudVideos(userId: string): Promise<VideoRecord[]> {
 export async function saveCloudVideo(userId: string, record: VideoRecord): Promise<void> {
   if (!supabase) return;
   const capabilities = await watchItemCapabilities();
+  const includeThumbnail = shouldSendThumbnail(record);
   const { error } = await supabase.from('watch_items').upsert(
-    { ...videoToRow(record, capabilities), user_id: userId },
+    { ...videoToRow(record, capabilities, includeThumbnail), user_id: userId },
     { onConflict: 'user_id,video_id' },
   );
   if (error) throw error;
+  if (includeThumbnail && record.thumbnail.startsWith('data:')) {
+    syncedThumbnails.set(record.videoId, record.thumbnail);
+  }
 }
 
 /**

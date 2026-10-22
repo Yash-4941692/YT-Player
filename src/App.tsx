@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import type { User } from '@supabase/supabase-js';
 import {
   Archive, ArchiveRestore, ArrowRight, ArrowUpRight, Check, ChevronDown, CircleHelp, Cloud, CloudOff,
-  FileText, Film, HardDrive, Info, ListMusic, Play, ShieldCheck, Trash2, X, Zap,
+  FileText, Film, HardDrive, Info, ListMusic, Pencil, Play, ShieldCheck, Trash2, X, Zap,
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ChaptersPanel } from './components/ChaptersPanel';
@@ -25,6 +25,7 @@ import {
   isDeleted, mergeLessonCopies, withDeletion, withoutDeletion, withoutDeletedPdfs, type DeletedMap,
 } from './lib/lessonSync';
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
+import { captureVideoPoster } from './lib/thumbnails';
 import {
   emptyVideoRecord, fileLessonId, fileVideoRecord, formatTime, isFileLesson, isYouTubeLink, lessonUrlFor,
   parseChapters, parseLessonInput,
@@ -143,6 +144,8 @@ export default function App() {
   const activeVideoIdRef = useRef<string | null>(null);
   const sourceRef = useRef<PlayerSource | null>(null);
   const libraryMigratedRef = useRef(false);
+  // Lessons whose first frame has already been captured (or attempted) in this tab.
+  const posterAttemptsRef = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timestampsRef = useRef<HTMLDetailsElement>(null);
   const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
@@ -344,6 +347,32 @@ export default function App() {
       return changed ? next : current;
     });
   }, []);
+
+  /**
+   * Give a direct video link a real thumbnail: the first frame, read off the video itself.
+   * A YouTube lesson already has i.ytimg.com for that; a file link has no picture at all, so
+   * its card keeps the link placeholder until this succeeds (it only can when the host serves
+   * the file with CORS headers — see src/lib/thumbnails.ts).
+   */
+  useEffect(() => {
+    const record = activeRecord;
+    if (!record || !isFileLesson(record) || !record.sourceUrl || record.thumbnail) return;
+    if (posterAttemptsRef.current.has(record.videoId)) return;
+    posterAttemptsRef.current.add(record.videoId);
+    let cancelled = false;
+    // Let the player have the bandwidth first; the capture reads its own small range.
+    const timer = window.setTimeout(() => {
+      void captureVideoPoster(record.sourceUrl as string).then((dataUrl) => {
+        if (cancelled || !dataUrl) return;
+        updateVideo(record.videoId, { thumbnail: dataUrl });
+        showToast('Thumbnail captured from the video.');
+      });
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeRecord?.videoId, activeRecord?.thumbnail, activeRecord?.sourceUrl, showToast, updateVideo]);
 
   // Load the account-backed PDF library. Guest uploads (session-only) are kept alongside it.
   useEffect(() => {
@@ -808,6 +837,14 @@ export default function App() {
     }
   }
 
+  /** Rename a lesson (and move it to another subject). Saves to the browser and the account. */
+  function renameVideo(record: VideoRecord, title: string, subject: Subject) {
+    const nextTitle = title.trim().slice(0, 160);
+    if (!nextTitle) return;
+    updateVideo(record.videoId, { title: nextTitle, subject });
+    showToast('Lesson renamed.');
+  }
+
   function archiveVideo(record: VideoRecord) {
     updateVideo(record.videoId, { archived: true });
     showToast('Removed from your library. You can restore it from Removed.');
@@ -1222,13 +1259,21 @@ export default function App() {
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, button, a, summary, [role="button"], [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      // Never while typing.
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      // A button, link or disclosure that is not part of the player keeps its own keys
+      // (Space activates it). Inside the player card the shortcuts always win, so clicking a
+      // control and then pressing Space still plays and pauses instead of doing nothing.
+      if (!target?.closest('.player-card') && target?.closest('button, a, summary, [role="button"]')) return;
       const controls = playerControlsRef.current;
       if (!controls || !activeVideoId) return;
       const key = event.key.toLowerCase();
-      if (event.code === 'Space') { event.preventDefault(); controls.togglePlayback(); }
+      if (event.code === 'Space' || key === 'k') { event.preventDefault(); controls.togglePlayback(); }
       else if (key === 'arrowleft') { event.preventDefault(); controls.seekBy(-10); }
       else if (key === 'arrowright') { event.preventDefault(); controls.seekBy(10); }
+      else if (key === 'j') { event.preventDefault(); controls.seekBy(-10); }
+      else if (key === 'l') { event.preventDefault(); controls.seekBy(10); }
       else if (key === 'arrowup') { event.preventDefault(); controls.adjustVolume(5); }
       else if (key === 'arrowdown') { event.preventDefault(); controls.adjustVolume(-5); }
       else if (key === 'f') { event.preventDefault(); controls.toggleFullscreen(); }
@@ -1376,6 +1421,7 @@ export default function App() {
                 {source.kind === 'file' ? (
                   <FilePlayer
                     source={source}
+                    poster={activeRecord?.thumbnail || undefined}
                     controlsRef={playerControlsRef}
                     onReady={onPlayerReady}
                     onStateChange={onPlayerStateChange}
@@ -1408,7 +1454,7 @@ export default function App() {
                 <div className="player-progress"><span style={{ width: `${progress}%` }} /></div>
                 <details className="shortcut-disclosure">
                   <summary><span><Zap size={15} /> Keyboard shortcuts</span><span className="shortcut-summary-action">Show <ChevronDown size={15} /></span></summary>
-                  <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
+                  <div className="shortcut-strip"><span><Zap size={14} /> QUICK KEYS</span><kbd>Space</kbd><small>play</small><kbd>←</kbd><kbd>→</kbd><small>seek</small><kbd>J</kbd><kbd>L</kbd><small>±10s</small><kbd>F</kbd><small>fullscreen</small><kbd>M</kbd><small>mute</small><kbd>C</kbd><small>captions</small></div>
                 </details>
               </article>
 
@@ -1532,10 +1578,18 @@ export default function App() {
                         onResume={() => resumeVideo(video)}
                         onRestore={() => restoreVideo(video)}
                         onDeleteForever={() => void deleteVideoForever(video)}
+                        onRename={(title, subject) => renameVideo(video, title, subject)}
                       />
                     ))
                   : filteredLibrary.map((video) => (
-                      <LibraryCard key={video.videoId} video={video} active={video.videoId === activeVideoId} onResume={() => resumeVideo(video)} onRemove={() => archiveVideo(video)} />
+                      <LibraryCard
+                        key={video.videoId}
+                        video={video}
+                        active={video.videoId === activeVideoId}
+                        onResume={() => resumeVideo(video)}
+                        onRemove={() => archiveVideo(video)}
+                        onRename={(title, subject) => renameVideo(video, title, subject)}
+                      />
                     ))}
                 {!showingRemoved && filteredLibrary.length === 0 && <div className="library-empty">Nothing in this subject yet.</div>}
                 {showingRemoved && removedVideos.length === 0 && <div className="library-empty">Nothing has been removed.</div>}
@@ -1579,16 +1633,37 @@ interface LibraryCardProps {
   onRemove?: () => void;
   onRestore?: () => void;
   onDeleteForever?: () => void;
+  /** Rename a lesson and/or move it to another subject. */
+  onRename?: (title: string, subject: Subject) => void;
 }
 
-function LibraryCard({ video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever }: LibraryCardProps) {
+function LibraryCard({
+  video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
+}: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(video.title);
+  const [draftSubject, setDraftSubject] = useState<Subject>(video.subject);
+
+  function startEditing() {
+    setDraftTitle(video.title);
+    setDraftSubject(video.subject);
+    setEditing(true);
+  }
+
+  function save() {
+    const title = draftTitle.trim();
+    if (!title) return;
+    onRename?.(title, draftSubject);
+    setEditing(false);
+  }
+
   return (
-    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''}`}>
-      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`}>
+    <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''} ${editing ? 'library-card-editing' : ''}`}>
+      <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`} tabIndex={editing ? -1 : 0}>
         {video.thumbnail
           ? <img src={video.thumbnail} alt="" loading="lazy" />
-          // A direct video link has no thumbnail to fetch, so the card shows the link mark.
+          // A direct video link has no picture until the first frame is captured.
           : <span className="library-thumb-link"><Film size={22} /></span>}
         <span className="library-play"><Play size={14} fill="currentColor" /></span>
         <span className="library-duration">{video.duration ? formatTime(video.duration) : video.subject}</span>
@@ -1596,25 +1671,65 @@ function LibraryCard({ video, active, removed = false, onResume, onRemove, onRes
       </button>
       <div className="library-card-body">
         <div className="library-card-overline">
-          <span className={`subject-tag ${subjectClass(video.subject)}`}>{video.subject}</span>
+          <span className={`subject-tag ${subjectClass(editing ? draftSubject : video.subject)}`}>{editing ? draftSubject : video.subject}</span>
           <span className="library-card-tools">
-            {video.sourceKind === 'file' && <span className="library-source-badge" title={video.sourceUrl || 'Direct video link'}>LINK</span>}
-            {video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
-            {!removed && (
+            {!editing && video.sourceKind === 'file' && <span className="library-source-badge" title={video.sourceUrl || 'Direct video link'}>LINK</span>}
+            {!editing && video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
+            {!editing && onRename && (
+              <button className="library-rename-button" onClick={startEditing} aria-label={`Rename ${video.title}`} title="Rename lesson"><Pencil size={13} /></button>
+            )}
+            {!editing && !removed && (
               <button className="library-remove" onClick={onRemove} aria-label={`Remove ${video.title} from your library`} title="Remove from library"><Trash2 size={14} /></button>
             )}
           </span>
         </div>
-        <button className="library-video-title" onClick={onResume}>{video.title}</button>
-        <p>{video.channel || (video.sourceKind === 'file' ? 'Direct video link' : 'YouTube lesson')}</p>
-        <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-        {removed ? (
-          <div className="library-removed-actions">
-            <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
-            <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
-          </div>
+
+        {editing ? (
+          <form
+            className="library-rename"
+            onSubmit={(event) => { event.preventDefault(); save(); }}
+          >
+            <label className="library-rename-field">
+              <span className="sr-only">Lesson title</span>
+              <input
+                value={draftTitle}
+                onChange={(event) => setDraftTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') { event.preventDefault(); save(); }
+                  if (event.key === 'Escape') { event.preventDefault(); setEditing(false); }
+                }}
+                // Focused on open so typing a new name works straight away.
+                autoFocus
+                maxLength={160}
+                placeholder="Lesson title"
+              />
+            </label>
+            <div className="library-rename-row">
+              <select
+                value={draftSubject}
+                onChange={(event) => setDraftSubject(event.target.value as Subject)}
+                aria-label="Subject"
+              >
+                {subjects.map((subject) => <option key={subject}>{subject}</option>)}
+              </select>
+              <button type="submit" className="library-rename-save"><Check size={13} /> Save</button>
+              <button type="button" className="library-rename-cancel" onClick={() => setEditing(false)} aria-label="Cancel rename"><X size={13} /></button>
+            </div>
+          </form>
         ) : (
-          <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+          <>
+            <button className="library-video-title" onClick={onResume} title={video.title}>{video.title}</button>
+            <p>{video.channel || (video.sourceKind === 'file' ? 'Direct video link' : 'YouTube lesson')}</p>
+            <div className="library-card-progress"><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
+            {removed ? (
+              <div className="library-removed-actions">
+                <button className="library-restore-button" onClick={onRestore}><ArchiveRestore size={13} /> Restore</button>
+                <button className="library-delete-forever" onClick={onDeleteForever} title="Delete this lesson and its saved PDF for good"><Trash2 size={13} /> Delete forever</button>
+              </div>
+            ) : (
+              <button className="library-resume-button" onClick={onResume}>{video.currentTime > 5 ? `Resume at ${formatTime(video.currentTime)}` : 'Start lesson'} <ArrowRight size={13} /></button>
+            )}
+          </>
         )}
       </div>
     </article>

@@ -2,7 +2,9 @@
 
 A responsive study desk for JEE One Shots: watch a YouTube lesson **or any direct video link**, with your timestamp chapters and PDF notes open side by side. The PDF viewer renders pages on canvas, so notes are readable inline on phones and desktop (no download prompt), and the whole app is built around one screen — video on one side, notes on the other, your library below.
 
-**Direct video links:** paste `https://filesto.o2zone.space/d/TnYng8W`, an `.mp4`/`.webm` file, or an HLS `.m3u8` playlist and it streams in the same room — progress, chapters and notes work exactly as they do for YouTube. The browser plays the link directly; nothing is downloaded, proxied or re-hosted.
+**Direct video links:** paste `https://filesto.o2zone.space/d/TnYng8W`, an `.mp4`/`.webm` file, or an HLS `.m3u8` playlist and it streams in the same room — progress, chapters and notes work exactly as they do for YouTube. The browser plays the link directly; nothing is downloaded, proxied or re-hosted. These lessons get a full custom player (the YouTube-style control bar described below), and the video's first frame becomes the lesson thumbnail.
+
+**Rename anything:** every lesson card has a pencil button — rename the lesson and move it to another subject without leaving the library. The new name syncs to your account like everything else.
 
 **PDF library:** signed-in users can upload PDFs to a personal shelf that is not tied to any one lesson. Every PDF is private to the account, can be renamed, tagged by subject, read full screen, downloaded, or attached to the lesson on screen — and it appears on every device they sign in from.
 
@@ -136,12 +138,41 @@ from the URL you pasted:
   opened,
 - file-host download links without an extension, such as `https://filesto.o2zone.space/d/TnYng8W`.
 
+### The player
+
+Direct links get a custom control bar (the browser's own `controls` bar is not used, because it
+swallows Space and the arrow keys and cannot preview a frame while scrubbing):
+
+- **play / pause**, the buffered range, and the played range with a draggable knob;
+- **scrub preview** — hover or drag the bar and a small window shows that exact frame and its
+  timestamp, like YouTube. The preview streams the same link; it is created on the first hover
+  and released again after 20 s of no use;
+- **time readout** (`watched / total`), **volume** slider + mute, **playback speed** (0.5×–2×),
+  **picture-in-picture** (where the browser supports it) and **fullscreen**;
+- single click on the video plays/pauses, double click goes fullscreen, and the bar fades out
+  while playing;
+- **keyboard** works the same way for every lesson: `Space`/`K` play–pause, `←`/`→` seek 5 s in
+  the player (`J`/`L` 10 s), `↑`/`↓` volume, `M` mute, `F` fullscreen, `C` captions,
+  `Home`/`End` jump to the start/end.
+
+### Thumbnails
+
+A YouTube lesson borrows its picture from i.ytimg.com. A direct link has none, so the player
+captures the video's **first frame** (a moment after the start, to avoid a black fade-in),
+shrinks it to a small JPEG and stores it as the lesson thumbnail — it then appears on the
+library card and as the player's poster on every device. Browsers only allow that when the host
+serves the file with CORS headers; when it does not, the card keeps the `LINK` placeholder and
+the player simply shows the video itself.
+
 A few things are up to the host, not the app: it has to serve the video **file** (a page with a
 download button cannot be played), it must not require cookies or a Referer header from its own
 site, and playback can be blocked if the host forbids other sites from using the file. If a link
 cannot be played, the player says so and offers **Open the link** and **Try again** instead of a
 blank screen. The link itself is saved with the lesson (`source_url`), so it opens on every
 device you sign in from.
+
+> YouTube lessons keep YouTube's own player, so their keyboard shortcuts work while the YouTube
+> iframe itself has focus. Our shortcuts work whenever the page (not the iframe) has focus.
 
 ## Local development
 
@@ -192,6 +223,6 @@ npm run build:app-icons
 
 - YouTube videos are embedded/streamed by YouTube; the app does not download or host videos. Some owners disable embedding, in which case the player offers a link to open the video on YouTube.
 - Direct video links are streamed by the browser from the URL you paste. The app never stores the video file — only the link, its progress, your timestamps and your notes.
-- Keyboard shortcuts (when not typing): **Space** play/pause, **← / →** seek 10 seconds, **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions.
+- Keyboard shortcuts (when not typing): **Space** or **K** play/pause, **← / →** seek 10 seconds (**J / L** too), **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions. Inside the custom player the arrows seek 5 seconds, matching the scrubber's own step.
 - There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library (`watch_items` for lesson notes, `pdf_library` for the PDF library).
 - PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, loaded only when a notes panel is opened. Pages render lazily, so large PDFs stay smooth on phones.
