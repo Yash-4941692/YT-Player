@@ -147,7 +147,9 @@ swallows Space and the arrow keys and cannot preview a frame while scrubbing):
 - **scrub preview** — hover or drag the bar and a small window shows that exact frame and its
   timestamp, like YouTube. The preview streams the same link; it is created on the first hover
   and released again after 20 s of no use;
-- **time readout** (`watched / total`), **volume** slider + mute, **playback speed** (0.5×–2×),
+- **time readout** (`watched / total`), **volume** slider + mute, **playback speed** — the usual
+  0.5×–2× presets plus a **custom** field for anything from 0.1× to 16× (the speed you pick is
+  remembered for your next lesson),
   **picture-in-picture** (where the browser supports it) and **fullscreen**;
 - single click on the video plays/pauses, double click goes fullscreen, and the bar fades out
   while playing;
@@ -157,12 +159,18 @@ swallows Space and the arrow keys and cannot preview a frame while scrubbing):
 
 ### Thumbnails
 
-A YouTube lesson borrows its picture from i.ytimg.com. A direct link has none, so the player
-captures the video's **first frame** (a moment after the start, to avoid a black fade-in),
-shrinks it to a small JPEG and stores it as the lesson thumbnail — it then appears on the
-library card and as the player's poster on every device. Browsers only allow that when the host
-serves the file with CORS headers; when it does not, the card keeps the `LINK` placeholder and
-the player simply shows the video itself.
+A YouTube lesson borrows its picture from i.ytimg.com. A direct link has none, so the frame at
+**00:01** is used — a second in, because frame zero is usually a fade-in from black. It is
+produced two ways, so it works on every host:
+
+1. **Captured and saved.** The frame is read with a canvas, shrunk to a small JPEG and stored
+   as the lesson thumbnail (and the player's poster), so it shows on every device. A browser
+   only allows this when the host serves the video with CORS headers.
+2. **Shown live.** When the host does not send those headers (nothing on the page may read its
+   pixels), the card instead holds a paused `<video>` on that same 00:01 frame. Displaying a
+   video is always allowed — only reading it is not — so the thumbnail still appears; it is
+   simply not saved to the account. Such hosts are remembered in the tab, so the app does not
+   keep retrying them for every lesson.
 
 A few things are up to the host, not the app: it has to serve the video **file** (a page with a
 download button cannot be played), it must not require cookies or a Referer header from its own

@@ -10,6 +10,7 @@ import { PdfLibraryPanel } from './components/PdfLibraryPanel';
 import { PdfLibraryViewer, usePdfAnnotationController } from './components/PdfLibraryViewer';
 import { PdfViewer } from './components/PdfViewer';
 import { FilePlayer } from './components/FilePlayer';
+import { LessonThumb } from './components/LessonThumb';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
   clearCloudVideoDeletion, cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
@@ -25,7 +26,7 @@ import {
   isDeleted, mergeLessonCopies, withDeletion, withoutDeletion, withoutDeletedPdfs, type DeletedMap,
 } from './lib/lessonSync';
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
-import { captureVideoPoster } from './lib/thumbnails';
+import { captureVideoPoster, hostBlocksFrameCapture } from './lib/thumbnails';
 import {
   emptyVideoRecord, fileLessonId, fileVideoRecord, formatTime, isFileLesson, isYouTubeLink, lessonUrlFor,
   parseChapters, parseLessonInput,
@@ -358,14 +359,24 @@ export default function App() {
     const record = activeRecord;
     if (!record || !isFileLesson(record) || !record.sourceUrl || record.thumbnail) return;
     if (posterAttemptsRef.current.has(record.videoId)) return;
+    // This host already refused to hand over a frame; its cards show the live 00:01 frame.
+    if (hostBlocksFrameCapture(record.sourceUrl)) return;
     posterAttemptsRef.current.add(record.videoId);
     let cancelled = false;
     // Let the player have the bandwidth first; the capture reads its own small range.
     const timer = window.setTimeout(() => {
-      void captureVideoPoster(record.sourceUrl as string).then((dataUrl) => {
-        if (cancelled || !dataUrl) return;
-        updateVideo(record.videoId, { thumbnail: dataUrl });
-        showToast('Thumbnail captured from the video.');
+      void captureVideoPoster(record.sourceUrl as string).then((capture) => {
+        if (cancelled) return;
+        if (capture.dataUrl) {
+          updateVideo(record.videoId, { thumbnail: capture.dataUrl });
+          showToast('Thumbnail saved from 00:01 of the video.');
+          return;
+        }
+        if (capture.blocked) {
+          // The card keeps showing the live 00:01 frame, so nothing looks broken — only the
+          // saved copy that would follow the account is missing.
+          console.info('This host does not allow its video frame to be read (no CORS headers). The library card shows the live 00:01 frame instead.');
+        }
       });
     }, 1800);
     return () => {
@@ -1661,10 +1672,8 @@ function LibraryCard({
   return (
     <article className={`library-card glass-card ${active ? 'library-card-active' : ''} ${removed ? 'library-card-removed' : ''} ${editing ? 'library-card-editing' : ''}`}>
       <button className="library-thumb" onClick={onResume} aria-label={`Open ${video.title}`} tabIndex={editing ? -1 : 0}>
-        {video.thumbnail
-          ? <img src={video.thumbnail} alt="" loading="lazy" />
-          // A direct video link has no picture until the first frame is captured.
-          : <span className="library-thumb-link"><Film size={22} /></span>}
+        {/* A saved picture, or the clip's own 00:01 frame, or the link placeholder. */}
+        <LessonThumb video={video} still={removed} />
         <span className="library-play"><Play size={14} fill="currentColor" /></span>
         <span className="library-duration">{video.duration ? formatTime(video.duration) : video.subject}</span>
         {active && <span className="library-live">OPEN NOW</span>}

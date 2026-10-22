@@ -43,6 +43,33 @@ type Status = 'loading' | 'ready' | 'error';
 
 const LINK_FAILED = 'This link did not play as a video file. If it opens a page with a download button, copy the direct .mp4 or .m3u8 link instead of the page link.';
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const MIN_RATE = 0.1;
+const MAX_RATE = 16;
+/** The speed the listener picked last — a preference, so it is kept between lessons. */
+const RATE_KEY = 'focusframe.playbackRate.v1';
+
+export function sanitizeRate(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  if (value < MIN_RATE || value > MAX_RATE) return null;
+  return Math.round(value * 100) / 100;
+}
+
+function storedRate(): number {
+  try {
+    const parsed = sanitizeRate(Number(window.localStorage.getItem(RATE_KEY)));
+    return parsed ?? 1;
+  } catch {
+    return 1;
+  }
+}
+
+function rememberRate(rate: number): void {
+  try {
+    window.localStorage.setItem(RATE_KEY, String(rate));
+  } catch {
+    // A blocked storage area only costs the preference, never playback.
+  }
+}
 const HIDE_CONTROLS_AFTER = 2800;
 const UNLOAD_PREVIEW_AFTER = 20000;
 
@@ -94,7 +121,8 @@ export function FilePlayer({
   const [buffered, setBuffered] = useState(0);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
-  const [rate, setRate] = useState(1);
+  const [rate, setRate] = useState(storedRate);
+  const [customRate, setCustomRate] = useState(() => String(storedRate()));
   const [fullscreen, setFullscreen] = useState(false);
   const [canPip, setCanPip] = useState(false);
 
@@ -102,6 +130,7 @@ export function FilePlayer({
   const [scrubbing, setScrubbing] = useState(false);
   const [preview, setPreview] = useState<{ time: number; x: number; width: number } | null>(null);
   const [rateMenuOpen, setRateMenuOpen] = useState(false);
+  const [rateError, setRateError] = useState('');
 
   const fileUrl = source.fileUrl ?? '';
   callbacksRef.current = { onReady, onStateChange, onVideoChange, onTick, onError };
@@ -267,9 +296,17 @@ export function FilePlayer({
 
   const applyRate = useCallback((next: number) => {
     const element = videoRef.current;
-    setRate(next);
+    const value = sanitizeRate(next);
+    if (value === null) {
+      setRateError(`Use a speed between ${MIN_RATE} and ${MAX_RATE}.`);
+      return;
+    }
+    setRate(value);
+    setCustomRate(String(value));
+    setRateError('');
     setRateMenuOpen(false);
-    if (element) element.playbackRate = next;
+    rememberRate(value);
+    if (element) element.playbackRate = value;
   }, []);
 
   const toggleCaptions = useCallback(() => {
@@ -755,6 +792,36 @@ export function FilePlayer({
                     {option}x
                   </button>
                 ))}
+                <form
+                  className="fp-menu-custom"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    applyRate(Number(customRate));
+                  }}
+                >
+                  <label>
+                    <span className="sr-only">Custom playback speed</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min={MIN_RATE}
+                      max={MAX_RATE}
+                      step={0.05}
+                      value={customRate}
+                      onChange={(event) => { setCustomRate(event.target.value); setRateError(''); }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') { event.stopPropagation(); setRateMenuOpen(false); }
+                      }}
+                      placeholder="1.4"
+                      aria-label="Custom playback speed"
+                    />
+                    <span aria-hidden="true">x</span>
+                  </label>
+                  <button type="submit" className="fp-menu-set">Set</button>
+                </form>
+                {rateError
+                  ? <p className="fp-menu-hint is-error" role="alert">{rateError}</p>
+                  : <p className="fp-menu-hint">{MIN_RATE}–{MAX_RATE}x · saved for your next lesson</p>}
               </div>
             )}
           </div>
