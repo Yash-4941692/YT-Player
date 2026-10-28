@@ -23,6 +23,10 @@ function loadPdfjs(): Promise<PdfJs> {
     ]).then(([pdfjs, worker]) => {
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
       return pdfjs;
+    }).catch((error: unknown) => {
+      // A transient chunk/network failure must not poison all later attempts in this tab.
+      pdfjsPromise = null;
+      throw error;
     });
   }
   return pdfjsPromise;
@@ -63,8 +67,7 @@ const ZOOM_STEPS = [50, 75, 100, 125, 150, 175, 200, 250, 300];
 
 /**
  * Everything the opt-in PDF annotation editor needs. When this prop is omitted the viewer
- * behaves EXACTLY as before: no text layer, no overlay, no annotation toolbar.
- * The lesson-notes viewer in the study room never passes it.
+ * has no text layer, overlay, or annotation toolbar.
  */
 export interface PdfAnnotationBridge {
   annotations: Annotation[];
@@ -102,6 +105,8 @@ export interface PdfViewerProps {
   status: string;
   locked: boolean;
   expanded: boolean;
+  /** Keep the document mounted but out of view while another study tab is selected. */
+  hidden?: boolean;
   /** Hide the "replace file" action (used when the PDF belongs to the library). */
   allowReplace?: boolean;
   /** Opt-in annotation editor. Omit it (the default) to keep the plain reader. */
@@ -117,7 +122,7 @@ export interface PdfViewerProps {
 }
 
 export function PdfViewer({
-  url, name, size, cloud, uploading, error, status, locked, expanded, allowReplace = true, annotations = null,
+  url, name, size, cloud, uploading, error, status, locked, expanded, hidden = false, allowReplace = true, annotations = null,
   onPageCount, onPickFile, onFile, onRemove, onDownload, onSignIn, onToggleExpand,
 }: PdfViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -140,6 +145,9 @@ export function PdfViewer({
   const [viewerStatus, setViewerStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [loadError, setLoadError] = useState('');
   const [pageCount, setPageCount] = useState(0);
+  // Mount annotation editors only once a page is near the viewport. Keeping visited editors
+  // mounted preserves an in-progress sticky note even if the user scrolls away from it.
+  const [visitedPages, setVisitedPages] = useState<Set<number>>(() => new Set([1]));
   const [aspect, setAspect] = useState(1.414);
   const [zoom, setZoom] = useState(100);
   const [layoutWidth, setLayoutWidth] = useState(0);
@@ -168,9 +176,16 @@ export function PdfViewer({
     renderingRef.current.clear();
     visibleRef.current.clear();
     setPageCount(0);
+    setVisitedPages(new Set([1]));
     setCurrentPage(1);
     setPageDraft('1');
   }, []);
+
+  // Start loading the PDF.js code while a private signed URL is being requested, rather
+  // than waiting for that network round trip before downloading the reader itself.
+  useEffect(() => {
+    if (!url && uploading && !locked) void loadPdfjs().catch(() => undefined);
+  }, [url, uploading, locked]);
 
   // Load the document whenever the source URL changes.
   useEffect(() => {
@@ -330,12 +345,24 @@ export function PdfViewer({
     const root = scrollRef.current;
     if (!root || pageCount === 0) return;
     const observer = new IntersectionObserver((entries) => {
+      const newlyVisible: number[] = [];
       for (const entry of entries) {
         const pageNumber = Number((entry.target as HTMLElement).dataset.page);
         if (!Number.isFinite(pageNumber)) continue;
-        if (entry.isIntersecting) visibleRef.current.add(pageNumber);
-        else visibleRef.current.delete(pageNumber);
+        if (entry.isIntersecting) {
+          visibleRef.current.add(pageNumber);
+          newlyVisible.push(pageNumber);
+        } else visibleRef.current.delete(pageNumber);
       }
+      if (newlyVisible.length) setVisitedPages((previous) => {
+        let next = previous;
+        for (const pageNumber of newlyVisible) {
+          if (next.has(pageNumber)) continue;
+          if (next === previous) next = new Set(previous);
+          next.add(pageNumber);
+        }
+        return next;
+      });
       void renderVisiblePages();
     }, { root, rootMargin: '900px 0px' });
     pagesRef.current.forEach((element) => observer.observe(element));
@@ -520,6 +547,8 @@ export function PdfViewer({
   return (
     <div
       className={`pdf-viewer ${expanded ? 'is-expanded' : ''} ${dragging ? 'is-dragging' : ''} ${annotationMode ? 'is-annotating' : ''}`}
+      hidden={hidden}
+      style={hidden ? { display: 'none' } : undefined}
       onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={handleDrop}
@@ -657,7 +686,7 @@ export function PdfViewer({
                       }}
                     />
                   )}
-                  {annotations && (
+                  {annotations && visitedPages.has(pageNumber) && (
                     <PdfAnnotationOverlay
                       page={pageNumber}
                       annotations={annotations.annotations}

@@ -6,3 +6,4 @@ dist
 .DS_Store
 tools/sync-sim/.build
 tools/sync-sim/.profiles
+tools/pdf-open-sim/.build

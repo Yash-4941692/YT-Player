@@ -67,10 +67,14 @@ export interface PlayerVideoInfo {
   playlistIndex?: number;
 }
 
+/** A lesson PDF kept as a File in this tab, without copying it into a data URL. */
 export interface SessionPdf {
-  data: string;
+  file: File;
   name: string;
   size: number;
+  /** Set once this exact file has been saved to the account. */
+  cloudPath?: string;
+  ownerId?: string;
 }
 
 export type StudyPanelView = 'notes' | 'timestamps';

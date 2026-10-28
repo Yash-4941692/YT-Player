@@ -34,7 +34,7 @@ import {
   emptyVideoRecord, fileLessonId, fileVideoRecord, formatTime, isFileLesson, isYouTubeLink, lessonUrlFor,
   parseChapters, parseLessonInput,
 } from './lib/youtube';
-import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, StudyPanelView, Subject, VideoRecord } from './types';
+import type { LibraryPdf, PersistedState, PlayerSource, PlayerVideoInfo, SessionPdf, StudyPanelView, Subject, VideoRecord } from './types';
 import { Analytics } from '@vercel/analytics/react';
 import './styles.css';
 import './readability.css';
@@ -43,8 +43,7 @@ type SyncStatus = 'local' | 'syncing' | 'synced' | 'error';
 
 interface PdfPreview {
   url: string;
-  name: string;
-  size: number;
+  /** Whether this URL is a cloud URL (local object URLs can also have a cloud copy). */
   cloud: boolean;
 }
 
@@ -59,12 +58,6 @@ function annotationMigrationHint(tables: string[]): string {
 }
 
 const MAX_PDF_SIZE = 100 * 1024 * 1024;
-
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  // Let the browser decode large data URLs natively rather than duplicating a 100 MB PDF in JS strings.
-  const response = await fetch(dataUrl);
-  return response.blob();
-}
 
 function downloadFromUrl(url: string, name: string) {
   const anchor = document.createElement('a');
@@ -112,10 +105,11 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [pdfError, setPdfError] = useState('');
   const [pdfStatus, setPdfStatus] = useState('');
-  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfUpload, setPdfUpload] = useState<{ videoId: string; session: SessionPdf } | null>(null);
   const [pdfPreview, setPdfPreview] = useState<PdfPreview | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
-  const [notesVersion, setNotesRevision] = useState(0);
+  // Session files live in a ref, so bump this when one is added or removed.
+  const [, setNotesRevision] = useState(0);
   const [libraryFilter, setLibraryFilter] = useState<'all' | Subject | 'removed'>('all');
 
   const [libraryPdfs, setLibraryPdfs] = useState<LibraryPdf[]>([]);
@@ -143,6 +137,8 @@ export default function App() {
   const [deleteSyncMissing, setDeleteSyncMissing] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
+  const authUserIdRef = useRef<string | null>(null);
+  authUserIdRef.current = authUser?.id ?? null;
   const deletionsRef = useRef(deletions);
   deletionsRef.current = deletions;
   const pdfTrashRef = useRef(pdfTrash);
@@ -159,7 +155,7 @@ export default function App() {
   const posterAttemptsRef = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timestampsRef = useRef<HTMLDetailsElement>(null);
-  const notesSessionRef = useRef<Record<string, { data: string; name: string; size: number }>>({});
+  const notesSessionRef = useRef<Record<string, SessionPdf>>({});
   const playlistIdRef = useRef<string | undefined>(undefined);
   const loadTokenRef = useRef(0);
   const lastProgressSaveRef = useRef(-1);
@@ -187,7 +183,6 @@ export default function App() {
     }
     return index;
   }, [parsedChapters, currentTime]);
-  const sessionPdf = activeVideoId ? notesSessionRef.current[activeVideoId] : undefined;
   const activeSubject = activeRecord?.subject ?? selectedSubject;
   const activeTitle = activeRecord?.title || (playerReady ? (source?.kind === 'file' ? 'Direct video lesson' : 'YouTube lesson') : 'Your lesson is loading…');
 
@@ -199,12 +194,27 @@ export default function App() {
     ),
     [libraryPdfs, pdfTrash],
   );
+  const activePdfTrashed = Boolean(activeRecord?.pdfPath && trashedLibraryPaths.has(activeRecord.pdfPath));
+  const cachedSessionPdf = activeVideoId ? notesSessionRef.current[activeVideoId] : undefined;
+  // A successfully uploaded file can keep its local preview, but only while the account and
+  // stored path still match. A replacement, removal, trash or sign-out must win over the cache.
+  const sessionPdf = cachedSessionPdf && (!cachedSessionPdf.cloudPath || (
+    cachedSessionPdf.cloudPath === activeRecord?.pdfPath
+    && cachedSessionPdf.ownerId === authUser?.id
+    && !activePdfTrashed
+  )) ? cachedSessionPdf : undefined;
+  const previewFile = sessionPdf?.file;
+  const previewCloudPath = !previewFile && !activePdfTrashed && authUser && supabase ? activeRecord?.pdfPath : undefined;
+  const previewOwnerId = previewCloudPath ? authUser?.id : undefined;
+  const pdfBusy = Boolean(pdfUpload && pdfUpload.videoId === activeVideoId);
+  const pdfName = (sessionPdf?.cloudPath ? activeRecord?.pdfName : sessionPdf?.name) || activeRecord?.pdfName || '';
+  const pdfSize = (sessionPdf?.cloudPath ? activeRecord?.pdfSize : sessionPdf?.size) ?? activeRecord?.pdfSize ?? 0;
 
   const linkedLibraryPdf = useMemo(
-    () => (activeRecord?.pdfPath
+    () => (activeRecord?.pdfPath && (!sessionPdf || sessionPdf.cloudPath === activeRecord.pdfPath)
       ? libraryPdfs.find((item) => item.storagePath && item.storagePath === activeRecord.pdfPath && !pdfTrash[item.id]) ?? null
       : null),
-    [activeRecord?.pdfPath, libraryPdfs, pdfTrash],
+    [activeRecord?.pdfPath, libraryPdfs, pdfTrash, sessionPdf],
   );
   const lessonPdfId = linkedLibraryPdf?.id ?? (activeVideoId && pdfPreview?.url ? `lesson:${activeVideoId}` : null);
   // A lesson's own PDF notes sync through the lesson row, a PDF attached from the library
@@ -851,10 +861,20 @@ export default function App() {
     });
   }, [chaptersRaw, activeVideoId]);
 
+  // Once a cloud-backed lesson is left, release its local File. Guest/failed uploads must
+  // stay available for this tab, but opening many saved lessons should not retain every file.
   useEffect(() => {
     const videoId = activeVideoId;
-    const record = activeRecord;
-    if (!videoId) {
+    if (!videoId) return;
+    return () => {
+      if (notesSessionRef.current[videoId]?.cloudPath) delete notesSessionRef.current[videoId];
+    };
+  }, [activeVideoId]);
+
+  // Resolve only when the actual source changes. Library refreshes create new arrays/sets
+  // every 15 seconds; depending on those objects would repeatedly tear down the PDF reader.
+  useEffect(() => {
+    if (!activeVideoId) {
       setPdfPreview(null);
       setPdfLoading(false);
       return;
@@ -862,26 +882,22 @@ export default function App() {
     let cancelled = false;
     let objectUrl = '';
     setPdfPreview(null);
-    if (sessionPdf) {
-      setPdfLoading(true);
-      dataUrlToBlob(sessionPdf.data).then((blob) => {
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setPdfPreview({ url: objectUrl, name: sessionPdf.name, size: sessionPdf.size, cloud: false });
-      }).catch(() => {
-        if (!cancelled) setPdfError('This PDF could not be opened in the preview. Try uploading it again.');
-      }).finally(() => { if (!cancelled) setPdfLoading(false); });
-      return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-    }
-    if (record?.pdfPath && trashedLibraryPaths.has(record.pdfPath)) {
-      // A library PDF moved to "Recently deleted" stays hidden until restored.
+    if (previewFile) {
+      try {
+        // File/Blob URLs are immediate and avoid encoding and decoding PDFs up to 100 MB.
+        objectUrl = URL.createObjectURL(previewFile);
+        setPdfPreview({ url: objectUrl, cloud: false });
+      } catch {
+        setPdfError('This PDF could not be opened in the preview. Try uploading it again.');
+      }
       setPdfLoading(false);
-      return () => { cancelled = true; };
+      return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
     }
-    if (record?.pdfPath && authUser && supabase) {
+    if (previewCloudPath) {
       setPdfLoading(true);
-      createPdfSignedUrl(record.pdfPath).then((url) => {
-        if (!cancelled) setPdfPreview({ url, name: record.pdfName || 'video-notes.pdf', size: record.pdfSize || 0, cloud: true });
+      setPdfError('');
+      createPdfSignedUrl(previewCloudPath).then((url) => {
+        if (!cancelled) setPdfPreview({ url, cloud: true });
       }).catch((error: unknown) => {
         if (!cancelled) setPdfError(error instanceof Error ? error.message : 'Could not load your saved PDF.');
       }).finally(() => { if (!cancelled) setPdfLoading(false); });
@@ -889,7 +905,7 @@ export default function App() {
       setPdfLoading(false);
     }
     return () => { cancelled = true; };
-  }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesVersion, sessionPdf, trashedLibraryPaths]);
+  }, [activeVideoId, previewFile, previewCloudPath, previewOwnerId]);
 
   // Resolve the URL for the PDF opened from the library (object URL for guests, signed link for accounts).
   useEffect(() => {
@@ -1160,20 +1176,24 @@ export default function App() {
     showToast('Removed from your library. You can restore it from Removed.');
   }
 
-  async function downloadPdf(pdf: PdfPreview) {
+  async function downloadPdf(pdf: PdfPreview, name: string) {
     if (!pdf.cloud) {
-      downloadFromUrl(pdf.url, pdf.name);
+      downloadFromUrl(pdf.url, name);
       return;
     }
+    let url = pdf.url;
     try {
-      const response = await fetch(pdf.url);
+      // The reader can stay open longer than a signed URL's lifetime. Get a fresh link for
+      // downloads without interrupting or reopening the document the user is reading.
+      if (previewCloudPath) url = await createPdfSignedUrl(previewCloudPath);
+      const response = await fetch(url);
       if (!response.ok) throw new Error('The download link expired.');
       const objectUrl = URL.createObjectURL(await response.blob());
-      downloadFromUrl(objectUrl, pdf.name);
+      downloadFromUrl(objectUrl, name);
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
     } catch {
       // If the browser blocks a cross-origin download, let the PDF viewer open its signed URL.
-      window.open(pdf.url, '_blank', 'noopener,noreferrer');
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
   }
 
@@ -1478,19 +1498,14 @@ export default function App() {
         setLibraryError('Sign in to attach library PDFs to a lesson.');
         return;
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const data = String(reader.result || '');
-        notesSessionRef.current[activeVideoId] = { data, name: item.name, size: item.size };
-        updateVideo(activeVideoId, { pdfName: item.name, pdfSize: item.size });
-        setNotesRevision((value) => value + 1);
-        setPdfError('');
-        setPdfStatus('Attached for this session.');
-        setPanelView('notes');
-        notePdfOpened(item);
-        showToast('PDF attached to this lesson.');
-      };
-      reader.readAsDataURL(item.file);
+      notesSessionRef.current[activeVideoId] = { file: item.file, name: item.name, size: item.size };
+      updateVideo(activeVideoId, { pdfName: item.name, pdfSize: item.size });
+      setNotesRevision((value) => value + 1);
+      setPdfError('');
+      setPdfStatus('Attached for this session.');
+      setPanelView('notes');
+      notePdfOpened(item);
+      showToast('PDF attached to this lesson.');
       return;
     }
     setLibraryError('');
@@ -1524,7 +1539,8 @@ export default function App() {
 
   async function handlePdfUpload(file: File) {
     setPanelView('notes');
-    if (!activeVideoId) {
+    const videoId = activeVideoId;
+    if (!videoId) {
       setPdfError('Load a video before adding its notes.');
       return;
     }
@@ -1536,65 +1552,75 @@ export default function App() {
       setPdfError('This PDF is larger than 100 MB. Choose a smaller file.');
       return;
     }
-    setPdfBusy(true);
+
+    // Open the original File immediately, while the cloud upload runs in parallel.
+    const session: SessionPdf = { file, name: file.name, size: file.size };
+    const record = videosRef.current.find((video) => video.videoId === videoId);
+    notesSessionRef.current[videoId] = session;
+    setNotesRevision((value) => value + 1);
     setPdfError('');
-    setPdfStatus('Reading your PDF…');
-    const reader = new FileReader();
-    reader.onerror = () => {
-      setPdfBusy(false);
-      setPdfError('The PDF could not be read. Please try again.');
-      setPdfStatus('');
-    };
-    reader.onload = async () => {
-      const data = String(reader.result || '');
-      notesSessionRef.current[activeVideoId] = { data, name: file.name, size: file.size };
-      setNotesRevision((value) => value + 1);
-      const record = videosRef.current.find((video) => video.videoId === activeVideoId);
-      if (authUser && supabase && cloudConfigured) {
-        setPdfStatus('Saving notes to your private cloud library…');
-        try {
-          // A PDF linked from the library is never deleted when a lesson replaces its notes.
-          const previousPath = isLibraryPath(record?.pdfPath) ? undefined : record?.pdfPath;
-          const path = await uploadCloudPdf(authUser.id, activeVideoId, file, previousPath);
-          // Drop the temporary in-memory data URL once cloud storage holds the file, so a
-          // later cross-device removal clears the preview cleanly instead of being shadowed.
-          delete notesSessionRef.current[activeVideoId];
-          const updated = updateVideo(activeVideoId, { pdfPath: path, pdfName: file.name, pdfSize: file.size });
-          pushVideoNow(updated, true);
-          setNotesRevision((value) => value + 1);
-          setPdfStatus('Saved to your private cloud library.');
-          showToast('PDF notes synced to your account.');
-        } catch (error) {
-          setPdfStatus('Session storage — notes are kept while the page is open.');
-          setPdfError(error instanceof Error ? `Cloud upload failed; this PDF is available for this session. ${error.message}` : 'Cloud upload failed; this PDF is available for this session.');
-        } finally {
-          setPdfBusy(false);
-        }
-      } else {
-        setPdfStatus('Session storage — notes are kept while the page is open.');
-        setPdfBusy(false);
+
+    if (!authUser || !supabase || !cloudConfigured) {
+      setPdfStatus('Session storage — notes are kept while the page is open.');
+      return;
+    }
+
+    const userId = authUser.id;
+    // A PDF linked from the library is never deleted when a lesson replaces its notes.
+    const previousPath = isLibraryPath(record?.pdfPath) ? undefined : record?.pdfPath;
+    setPdfUpload({ videoId, session });
+    setPdfStatus('Saving notes to your private cloud library…');
+    try {
+      const path = await uploadCloudPdf(userId, videoId, file);
+      // A later replacement, removal, account change, or remote deletion must not be
+      // overwritten by this slower upload completing out of order.
+      if (notesSessionRef.current[videoId] !== session || authUserIdRef.current !== userId
+        || !videosRef.current.some((video) => video.videoId === videoId)
+        || isDeleted(deletionsRef.current, 'lesson', videoId)) {
+        void deleteCloudPdf(path).catch(() => undefined);
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      // Keep showing the same local File after upload instead of downloading and parsing it
+      // again. If the lesson is no longer open, release it and use the cloud copy next time.
+      if (activeVideoIdRef.current === videoId) {
+        notesSessionRef.current[videoId] = { ...session, cloudPath: path, ownerId: userId };
+      } else {
+        delete notesSessionRef.current[videoId];
+      }
+      const updated = updateVideo(videoId, { pdfPath: path, pdfName: file.name, pdfSize: file.size });
+      pushVideoNow(updated, true);
+      setNotesRevision((value) => value + 1);
+      if (previousPath && previousPath !== path) void deleteCloudPdf(previousPath).catch(() => undefined);
+      if (activeVideoIdRef.current === videoId) {
+        setPdfStatus('Saved to your private cloud library.');
+        showToast('PDF notes synced to your account.');
+      }
+    } catch (error) {
+      if (notesSessionRef.current[videoId] === session && activeVideoIdRef.current === videoId) {
+        setPdfStatus('Session storage — notes are kept while the page is open.');
+        setPdfError(error instanceof Error ? `Cloud upload failed; this PDF is available for this session. ${error.message}` : 'Cloud upload failed; this PDF is available for this session.');
+      }
+    } finally {
+      setPdfUpload((current) => current?.session === session ? null : current);
+    }
   }
 
-  async function deletePdf() {
+  function deletePdf() {
     if (!activeVideoId) return;
-    // A library PDF is only unlinked here; the file itself stays in the PDF library.
+    const videoId = activeVideoId;
+    // Invalidate an in-flight upload before doing any network work, so it cannot restore a
+    // PDF that was just removed. A library file is only unlinked, never deleted here.
+    delete notesSessionRef.current[videoId];
+    setPdfUpload((current) => current?.videoId === videoId ? null : current);
+    deleteLocalAnnotations(`lesson:${videoId}`);
     if (activeRecord?.pdfPath && authUser && supabase && !isLibraryPath(activeRecord.pdfPath)) {
-      try {
-        await deleteCloudPdf(activeRecord.pdfPath);
-      } catch {
-        // Ignore storage removal errors so the lesson's PDF pointer can still be cleared.
-      }
+      void deleteCloudPdf(activeRecord.pdfPath).catch(() => undefined);
     }
-    delete notesSessionRef.current[activeVideoId];
-    deleteLocalAnnotations(`lesson:${activeVideoId}`);
     // The note's synced drawings go with it, so a later PDF on this lesson starts clean.
     if (authUser && supabase && !linkedLibraryPdf) {
-      void deleteCloudLessonAnnotations(authUser.id, activeVideoId).catch(() => undefined);
+      void deleteCloudLessonAnnotations(authUser.id, videoId).catch(() => undefined);
     }
-    const updated = updateVideo(activeVideoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
+    const updated = updateVideo(videoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
     pushVideoNow(updated, true);
     setPdfPreview(null);
     setNotesRevision((value) => value + 1);
@@ -1902,27 +1928,27 @@ export default function App() {
                   <button role="tab" aria-selected={panelView === 'timestamps'} className={panelView === 'timestamps' ? 'active' : ''} onClick={() => { setPanelView('timestamps'); setNotesExpanded(false); }}><ListMusic size={16} /> Timestamps{parsedChapters.length > 0 && <span className="tab-count">{parsedChapters.length}</span>}</button>
                 </div>
                 <div className="panel-body" role="tabpanel">
-                  {panelView === 'notes' ? (
-                    <PdfViewer
-                      url={pdfPreview?.url ?? ''}
-                      name={pdfPreview?.name ?? activeRecord?.pdfName ?? ''}
-                      size={pdfPreview?.size ?? activeRecord?.pdfSize ?? 0}
-                      cloud={pdfPreview?.cloud ?? false}
-                      uploading={pdfBusy || pdfLoading}
-                      error={pdfError}
-                      status={lessonAnnotations.annotateStatus || pdfStatus}
-                      locked={Boolean(activeRecord?.pdfPath && !authUser && !sessionPdf)}
-                      expanded={notesExpanded}
-                      annotations={pdfPreview?.url ? lessonAnnotations.bridge : null}
-                      onPageCount={(count) => linkedLibraryPdf && handlePdfPageCount(linkedLibraryPdf.id, count)}
-                      onPickFile={() => fileInputRef.current?.click()}
-                      onFile={(file) => void handlePdfUpload(file)}
-                      onRemove={() => void deletePdf()}
-                      onDownload={() => pdfPreview && void downloadPdf(pdfPreview)}
-                      onSignIn={() => setAuthOpen(true)}
-                      onToggleExpand={() => setNotesExpanded((value) => !value)}
-                    />
-                  ) : (
+                  <PdfViewer
+                    url={pdfPreview?.url ?? ''}
+                    name={pdfName}
+                    size={pdfSize}
+                    cloud={Boolean(pdfPreview?.cloud || sessionPdf?.cloudPath)}
+                    uploading={pdfBusy || pdfLoading}
+                    error={pdfError}
+                    status={lessonAnnotations.annotateStatus || pdfStatus}
+                    locked={Boolean(activeRecord?.pdfPath && !authUser && !sessionPdf)}
+                    expanded={notesExpanded}
+                    hidden={panelView !== 'notes'}
+                    annotations={pdfPreview?.url ? lessonAnnotations.bridge : null}
+                    onPageCount={(count) => linkedLibraryPdf && handlePdfPageCount(linkedLibraryPdf.id, count)}
+                    onPickFile={() => fileInputRef.current?.click()}
+                    onFile={(file) => void handlePdfUpload(file)}
+                    onRemove={deletePdf}
+                    onDownload={() => pdfPreview && void downloadPdf(pdfPreview, pdfName || 'video-notes.pdf')}
+                    onSignIn={() => setAuthOpen(true)}
+                    onToggleExpand={() => setNotesExpanded((value) => !value)}
+                  />
+                  {panelView === 'timestamps' && (
                     <ChaptersPanel
                       chapters={parsedChapters}
                       activeIndex={activeChapterIndex}

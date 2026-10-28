@@ -189,6 +189,16 @@ npm install
 npm run dev
 ```
 
+### Checking lesson PDF opening
+
+```bash
+npm run test:pdf-open
+```
+
+The simulated-browser checks cover slow signed links, immediate local previews while uploads
+run, lazy page editors, tab switches and background sync without reloading, and
+replacement/removal, trash, and sign-out races. They run on every pull request in CI.
+
 ### Checking that drawings still reach a second device
 
 ```bash
@@ -233,4 +243,4 @@ npm run build:app-icons
 - Direct video links are streamed by the browser from the URL you paste. The app never stores the video file — only the link, its progress, your timestamps and your notes.
 - Keyboard shortcuts (when not typing): **Space** or **K** play/pause, **← / →** seek 10 seconds (**J / L** too), **↑ / ↓** volume, **F** fullscreen, **M** mute, and **C** captions. Inside the custom player the arrows seek 5 seconds, matching the scrubber's own step.
 - There is no preloaded demo video. Guest PDF notes are intentionally session-only and are never written to localStorage; authenticated users can save PDFs to their private cloud library (`watch_items` for lesson notes, `pdf_library` for the PDF library).
-- PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, loaded only when a notes panel is opened. Pages render lazily, so large PDFs stay smooth on phones.
+- PDF notes are rendered with [PDF.js](https://mozilla.github.io/pdf.js/) on a canvas, with the reader loaded on demand and pages rendered lazily. Lesson uploads open directly from the selected file while the cloud upload runs; the same preview remains open after saving and when switching between notes and timestamps. A cached file is discarded from the viewer if the account, attachment, or trash state changes.
