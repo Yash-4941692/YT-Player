@@ -1,10 +1,11 @@
 import type { LessonSourceKind, PersistedState, Subject, VideoRecord } from '../types';
-import { normalizeDeletions, type DeletedMap } from './lessonSync';
+import { normalizeDeletions, normalizePdfSyncMap, type DeletedMap, type PdfSyncMap } from './lessonSync';
 
 const STORAGE_KEY = 'focusframe.jee.v1';
 /** Deletions this browser has already made (see src/lib/lessonSync.ts). */
 const DELETED_KEY = 'focusframe.deleted.v1';
 const PDF_TRASH_KEY = 'focusframe.pdfTrash.v1';
+const PDF_SYNC_KEY = 'focusframe.pdfSync.v1';
 const PDF_ACTIVITY_KEY = 'focusframe.pdfActivity.v1';
 const PDF_ANNOTATIONS_PREFIX = 'focusframe.pdfAnnotations.v1.';
 
@@ -127,6 +128,24 @@ export function loadLocalPdfTrash(): Record<string, number> {
 export function saveLocalPdfTrash(trash: Record<string, number>): void {
   try {
     window.localStorage.setItem(PDF_TRASH_KEY, JSON.stringify(trash));
+  } catch {
+    // Ignore storage quota errors.
+  }
+}
+
+export function loadLocalPdfSync(): PdfSyncMap {
+  try {
+    const raw = window.localStorage.getItem(PDF_SYNC_KEY);
+    if (!raw) return {};
+    return normalizePdfSyncMap(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+export function saveLocalPdfSync(syncMap: PdfSyncMap): void {
+  try {
+    window.localStorage.setItem(PDF_SYNC_KEY, JSON.stringify(syncMap));
   } catch {
     // Ignore storage quota errors.
   }

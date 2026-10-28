@@ -18,15 +18,33 @@ const PORT = Number(process.env.SIM_PORT || 8787);
 let writesToFail = Number(process.env.SIM_FAIL_WRITES || 0);
 let writesRejected = 0;
 
+const omitTables = new Set(
+  String(process.env.SIM_OMIT_TABLES || '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean),
+);
+const omitWatchColumns = new Set(
+  String(process.env.SIM_OMIT_WATCH_COLUMNS || '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean),
+);
+
 /** table -> rows */
-const tables = new Map([
-  ['watch_items', []],
-  ['pdf_library', []],
-  ['pdf_annotations', []],
-  ['lesson_annotations', []],
-  ['pdf_trash', []],
-  ['pdf_activity', []],
-]);
+const tables = new Map(
+  [
+    ['watch_items', []],
+    ['pdf_library', []],
+    ['pdf_annotations', []],
+    ['lesson_annotations', []],
+    ['pdf_trash', []],
+    ['pdf_activity', []],
+  ].filter(([name]) => !omitTables.has(name)),
+);
+
+/** `<bucket>/<path>` -> { userId, size } */
+const storageObjects = new Map();
 
 const log = [];
 const RESERVED = new Set(['select', 'on_conflict', 'order', 'limit', 'offset', 'columns', 'and', 'or']);
@@ -68,14 +86,18 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function readBody(req) {
+function readRawBody(req) {
   return new Promise((resolve) => {
-    let raw = '';
-    req.on('data', (chunk) => { raw += chunk; });
-    req.on('end', () => {
-      if (!raw) return resolve(null);
-      try { resolve(JSON.parse(raw)); } catch { resolve(null); }
-    });
+    const chunks = [];
+    req.on('data', (chunk) => { chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+function readBody(req) {
+  return readRawBody(req).then((buf) => {
+    if (!buf.length) return null;
+    try { return JSON.parse(buf.toString('utf8')); } catch { return null; }
   });
 }
 
@@ -100,9 +122,75 @@ const server = createServer(async (req, res) => {
       user: { id: user, aud: 'authenticated', role: 'authenticated', email: 'sim@focusframe.test' },
     });
   }
-  if (url.pathname === '/__reset') { tables.forEach((rows) => rows.length = 0); log.length = 0; return send(res, 200, { ok: true }); }
-  if (url.pathname === '/__state') return send(res, 200, Object.fromEntries(tables));
+  if (url.pathname === '/__reset') {
+    tables.forEach((rows) => { rows.length = 0; });
+    storageObjects.clear();
+    log.length = 0;
+    return send(res, 200, { ok: true });
+  }
+  if (url.pathname === '/__state') {
+    return send(res, 200, {
+      ...Object.fromEntries(tables),
+      storage: [...storageObjects.keys()],
+    });
+  }
   if (url.pathname === '/__writes-rejected') return send(res, 200, { rejected: writesRejected });
+
+  // Storage endpoints (`/storage/v1/object/...`) matching supabase-js StorageFileApi.
+  if (url.pathname.startsWith('/storage/v1/object/')) {
+    const sub = decodeSub(req.headers.authorization);
+    if (!sub && !url.searchParams.has('token')) {
+      return send(res, 401, { statusCode: '401', error: 'Unauthorized', message: 'Missing credentials' });
+    }
+    const rest = decodeURIComponent(url.pathname.slice('/storage/v1/object/'.length));
+    if (req.method === 'POST' && rest.startsWith('sign/')) {
+      const target = rest.slice('sign/'.length); // `<bucket>/<user>/<file>`
+      const parts = target.split('/');
+      const owner = parts[1];
+      if (owner !== sub || !storageObjects.has(target)) {
+        return send(res, 400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+      }
+      return send(res, 200, { signedURL: `/object/sign/${target}?token=sim-signed` });
+    }
+    if (req.method === 'GET' && rest.startsWith('sign/')) {
+      const target = rest.slice('sign/'.length);
+      const entry = storageObjects.get(target);
+      if (!entry) return send(res, 404, { message: 'Object not found' });
+      res.writeHead(200, { 'content-type': 'application/pdf', 'access-control-allow-origin': '*' });
+      res.end(entry.bytes);
+      return;
+    }
+    if (req.method === 'DELETE' && !rest.includes('/')) {
+      const bucket = rest;
+      const body = await readBody(req);
+      const prefixes = Array.isArray(body?.prefixes) ? body.prefixes : [];
+      const removed = [];
+      for (const prefix of prefixes) {
+        const clean = String(prefix).replace(/^\/+/, '');
+        const owner = clean.split('/')[0];
+        const key = `${bucket}/${clean}`;
+        if (owner === sub && storageObjects.has(key)) {
+          storageObjects.delete(key);
+          removed.push({ name: clean });
+        }
+      }
+      return send(res, 200, removed);
+    }
+    if (req.method === 'POST' || req.method === 'PUT') {
+      const slash = rest.indexOf('/');
+      const bucket = slash > 0 ? rest.slice(0, slash) : '';
+      const objectPath = slash > 0 ? rest.slice(slash + 1) : '';
+      const owner = objectPath.split('/')[0];
+      if (!bucket || owner !== sub) {
+        return send(res, 403, { statusCode: '403', error: 'Unauthorized', message: 'new row violates row-level security policy' });
+      }
+      const bytes = await readRawBody(req);
+      const fullKey = `${bucket}/${objectPath}`;
+      storageObjects.set(fullKey, { userId: sub, bytes });
+      return send(res, 200, { Id: fullKey, Key: fullKey });
+    }
+    return send(res, 405, { message: 'Method not allowed' });
+  }
 
   if (!url.pathname.startsWith('/rest/v1/')) {
     return send(res, 404, { message: 'Not found' });
@@ -164,6 +252,21 @@ const server = createServer(async (req, res) => {
   };
 
   if (req.method === 'GET') {
+    if (table === 'watch_items' && omitWatchColumns.size > 0) {
+      const requested = String(url.searchParams.get('select') || '')
+        .split(',')
+        .map((col) => col.trim())
+        .filter(Boolean);
+      const missingCol = requested.find((col) => omitWatchColumns.has(col));
+      if (missingCol) {
+        return send(res, 400, {
+          code: '42703',
+          details: null,
+          hint: null,
+          message: `column watch_items.${missingCol} does not exist`,
+        });
+      }
+    }
     const visible = rows.filter((row) => row.user_id === sub).filter((row) => matches(row, filters));
     log.push({ method: 'GET', path: url.pathname + url.search, prefer, status: 200, rows: visible.length });
     if (wantsObject) {
@@ -190,6 +293,19 @@ const server = createServer(async (req, res) => {
       return send(res, 503, { code: '503', message: 'Service Unavailable', details: 'simulated failure' });
     }
     const incoming = Array.isArray(body) ? body : [body];
+    if (table === 'watch_items' && omitWatchColumns.size > 0) {
+      const missingCol = incoming
+        .flatMap((row) => (row ? Object.keys(row) : []))
+        .find((col) => omitWatchColumns.has(col));
+      if (missingCol) {
+        return send(res, 400, {
+          code: 'PGRST204',
+          details: null,
+          hint: null,
+          message: `Could not find the '${missingCol}' column of 'watch_items' in the schema cache`,
+        });
+      }
+    }
     if (incoming.some((row) => !row || row.user_id !== sub)) {
       // Same rejection the insert/update policies produce.
       return send(res, 403, {
@@ -224,6 +340,17 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'PATCH') {
     const body = await readBody(req);
+    if (table === 'watch_items' && omitWatchColumns.size > 0 && body) {
+      const missingCol = Object.keys(body).find((col) => omitWatchColumns.has(col));
+      if (missingCol) {
+        return send(res, 400, {
+          code: 'PGRST204',
+          details: null,
+          hint: null,
+          message: `Could not find the '${missingCol}' column of 'watch_items' in the schema cache`,
+        });
+      }
+    }
     const targets = rows.filter((row) => row.user_id === sub).filter((row) => matches(row, filters));
     for (const row of targets) {
       Object.assign(row, body);
@@ -236,6 +363,16 @@ const server = createServer(async (req, res) => {
       .map((row, index) => ({ row, index }))
       .filter(({ row }) => row.user_id === sub && matches(row, filters));
     for (const { index } of [...doomed].reverse()) rows.splice(index, 1);
+    if (table === 'pdf_library' && doomed.length > 0) {
+      const deletedPdfIds = new Set(doomed.map(({ row }) => String(row.id)));
+      for (const childTable of ['pdf_trash', 'pdf_activity', 'pdf_annotations']) {
+        const childRows = tables.get(childTable);
+        if (!childRows) continue;
+        for (let i = childRows.length - 1; i >= 0; i -= 1) {
+          if (deletedPdfIds.has(String(childRows[i].pdf_id))) childRows.splice(i, 1);
+        }
+      }
+    }
     return withRepresentation(204, doomed.map(({ row }) => row));
   }
 

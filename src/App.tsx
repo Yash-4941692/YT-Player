@@ -14,16 +14,19 @@ import { LessonThumb } from './components/LessonThumb';
 import { YouTubePlayer, type PlayerControls } from './components/YouTubePlayer';
 import {
   clearCloudVideoDeletion, cloudConfigured, createLibraryPdf, createPdfSignedUrl, deleteCloudLessonAnnotations, deleteCloudPdf,
-  deleteCloudVideo, deleteLibraryPdf, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity, fetchPdfTrash,
-  isLibraryPath, probeAnnotationTables, restoreLibraryPdf, saveCloudVideo, savePdfActivity, supabase,
-  trashLibraryPdf, updateLibraryPdf, uploadCloudPdf, watchItemCapabilities,
+  deleteCloudVideo, deleteLibraryPdf, fetchCloudSyncLedger, fetchCloudVideos, fetchLibraryPdfs, fetchPdfActivity,
+  fetchPdfTrashMap, isLibraryPath, probeAnnotationTables, pushCloudSyncLedger, restoreLibraryPdf, saveCloudVideo,
+  savePdfActivity, subscribeCloudSyncLedger, supabase, trashLibraryPdf, updateLibraryPdf, uploadCloudPdf,
+  watchItemCapabilities,
 } from './lib/supabase';
 import {
-  deleteLocalAnnotations, loadLocalDeletions, loadLocalPdfActivity, loadLocalPdfTrash, loadLocalState,
-  moveAnnotationCache, saveLocalDeletions, saveLocalPdfActivity, saveLocalPdfTrash, saveLocalState, upsertVideo,
+  deleteLocalAnnotations, loadLocalDeletions, loadLocalPdfActivity, loadLocalPdfSync, loadLocalPdfTrash, loadLocalState,
+  moveAnnotationCache, saveLocalDeletions, saveLocalPdfActivity, saveLocalPdfSync, saveLocalPdfTrash, saveLocalState,
+  upsertVideo,
 } from './lib/storage';
 import {
-  isDeleted, mergeLessonCopies, withDeletion, withoutDeletion, withoutDeletedPdfs, type DeletedMap,
+  deletionKey, isDeleted, mergeLessonCopies, nextLessonStamp, reconcilePdfState, withDeletion, withoutDeletion,
+  type DeletedMap, type LessonTombstoneEntry, type LocalPdfSyncEntry, type PdfSyncEntry, type PdfSyncMap,
 } from './lib/lessonSync';
 import { sessionLibraryItem, sortLibrary, validateLibraryFile } from './lib/pdfLibrary';
 import { captureVideoPoster, hostBlocksFrameCapture } from './lib/thumbnails';
@@ -124,8 +127,9 @@ export default function App() {
   const [libraryUrl, setLibraryUrl] = useState('');
   const [libraryUrlLoading, setLibraryUrlLoading] = useState(false);
   const [libraryLoadedFor, setLibraryLoadedFor] = useState<string | null>(null);
-  // "Recently deleted" PDFs (pdf id -> when it was deleted) and per-PDF activity, backed by localStorage.
+  // "Recently deleted" PDFs (pdf id -> when it was deleted), per-PDF sync bookkeeping and activity, backed by localStorage.
   const [pdfTrash, setPdfTrash] = useState<Record<string, number>>(loadLocalPdfTrash);
+  const [pdfSync, setPdfSync] = useState<PdfSyncMap>(loadLocalPdfSync);
   const [pdfActivity, setPdfActivity] = useState<Record<string, { lastOpenedAt: number | null; pageCount: number | null }>>(loadLocalPdfActivity);
   const [trashUnavailable, setTrashUnavailable] = useState(false);
   // Names of the annotation tables this project is missing, checked once per sign-in so the
@@ -141,10 +145,16 @@ export default function App() {
   const playerControlsRef = useRef<PlayerControls | null>(null);
   const deletionsRef = useRef(deletions);
   deletionsRef.current = deletions;
+  const pdfTrashRef = useRef(pdfTrash);
+  pdfTrashRef.current = pdfTrash;
+  const pdfSyncRef = useRef(pdfSync);
+  pdfSyncRef.current = pdfSync;
   const libraryPdfsRef = useRef<LibraryPdf[]>([]);
   const activeVideoIdRef = useRef<string | null>(null);
   const sourceRef = useRef<PlayerSource | null>(null);
   const libraryMigratedRef = useRef(false);
+  const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
   // Lessons whose first frame has already been captured (or attempted) in this tab.
   const posterAttemptsRef = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -181,9 +191,20 @@ export default function App() {
   const activeSubject = activeRecord?.subject ?? selectedSubject;
   const activeTitle = activeRecord?.title || (playerReady ? (source?.kind === 'file' ? 'Direct video lesson' : 'YouTube lesson') : 'Your lesson is loading…');
 
+  const trashedLibraryPaths = useMemo(
+    () => new Set(
+      libraryPdfs
+        .filter((item) => Boolean(item.storagePath && pdfTrash[item.id]))
+        .map((item) => item.storagePath),
+    ),
+    [libraryPdfs, pdfTrash],
+  );
+
   const linkedLibraryPdf = useMemo(
-    () => (activeRecord?.pdfPath ? libraryPdfs.find((item) => item.storagePath && item.storagePath === activeRecord.pdfPath) ?? null : null),
-    [activeRecord?.pdfPath, libraryPdfs],
+    () => (activeRecord?.pdfPath
+      ? libraryPdfs.find((item) => item.storagePath && item.storagePath === activeRecord.pdfPath && !pdfTrash[item.id]) ?? null
+      : null),
+    [activeRecord?.pdfPath, libraryPdfs, pdfTrash],
   );
   const lessonPdfId = linkedLibraryPdf?.id ?? (activeVideoId && pdfPreview?.url ? `lesson:${activeVideoId}` : null);
   // A lesson's own PDF notes sync through the lesson row, a PDF attached from the library
@@ -202,12 +223,51 @@ export default function App() {
     window.setTimeout(() => setToast(''), 3200);
   }, []);
 
-  const updateVideo = useCallback((videoId: string, patch: Partial<VideoRecord>) => {
-    setVideos((current) => {
-      const existing = current.find((item) => item.videoId === videoId) ?? emptyVideoRecord(videoId);
-      const updated: VideoRecord = { ...existing, ...patch, updatedAt: Date.now() };
-      return upsertVideo(current, updated);
-    });
+  /**
+   * Update a lesson using a monotonic revision stamp (`nextLessonStamp`) so edits, removals,
+   * restores and PDF detachments win even when another device's clock sits ahead of this one.
+   */
+  const updateVideo = useCallback((videoId: string, patch: Partial<VideoRecord>): VideoRecord => {
+    const current = videosRef.current;
+    const existing = current.find((item) => item.videoId === videoId) ?? emptyVideoRecord(videoId);
+    const prevTombstone = deletionsRef.current[deletionKey('lesson', videoId)] ?? 0;
+    const stamp = patch.updatedAt ?? nextLessonStamp(existing.updatedAt, prevTombstone);
+    const updated: VideoRecord = { ...existing, ...patch, updatedAt: stamp };
+    const nextList = upsertVideo(current, updated);
+    videosRef.current = nextList;
+    setVideos(nextList);
+    return updated;
+  }, []);
+
+  /**
+   * Push an explicit user change (archive/remove, restore, rename, PDF attach/detach) straight
+   * to the account instead of waiting on the progress-tick debounce, and ping open tabs on
+   * other devices through the sync ledger so they refresh right away.
+   */
+  const pushVideoNow = useCallback((record: VideoRecord, signalOtherDevices = false) => {
+    if (!supabase || !authUser) return;
+    const userId = authUser.id;
+    if (isDeleted(deletionsRef.current, 'lesson', record.videoId)) return;
+    void saveCloudVideo(userId, record)
+      .then(() => {
+        if (!isDeleted(deletionsRef.current, 'lesson', record.videoId)) {
+          lastSyncedRef.current.set(record.videoId, record.updatedAt);
+        }
+        if (signalOtherDevices) {
+          void pushCloudSyncLedger(userId, { signalAt: record.updatedAt }).catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        // Leave `lastSyncedRef` untouched so the periodic sync / reconnect flush retries it.
+      });
+  }, [authUser]);
+
+  const closeActiveStudyRoom = useCallback(() => {
+    setSource(null);
+    setActiveVideoId(null);
+    setPdfPreview(null);
+    setNotesExpanded(false);
+    setNotesRevision((value) => value + 1);
   }, []);
 
   useEffect(() => {
@@ -222,6 +282,10 @@ export default function App() {
   useEffect(() => {
     saveLocalPdfTrash(pdfTrash);
   }, [pdfTrash]);
+
+  useEffect(() => {
+    saveLocalPdfSync(pdfSync);
+  }, [pdfSync]);
 
   useEffect(() => {
     saveLocalPdfActivity(pdfActivity);
@@ -256,14 +320,27 @@ export default function App() {
   const pushPendingLessonDeletes = useCallback((userId: string, pending: { videoId: string; deletedAt: number }[]) => {
     if (!supabase || pending.length === 0) return;
     void Promise.allSettled(pending.map((entry) => deleteCloudVideo(userId, entry.videoId, entry.deletedAt)));
+    const lessonsPatch: Record<string, LessonTombstoneEntry> = {};
+    let maxAt = 0;
+    for (const entry of pending) {
+      lessonsPatch[entry.videoId] = { status: 'deleted', at: entry.deletedAt };
+      if (entry.deletedAt > maxAt) maxAt = entry.deletedAt;
+    }
+    void pushCloudSyncLedger(userId, { lessons: lessonsPatch, signalAt: maxAt }).catch(() => undefined);
   }, []);
 
   /**
    * Reconcile this browser with the account: the single place where copies are merged, both
    * when the account loads and every time the app checks for changes another device made.
    */
-  const reconcileLessons = useCallback((userId: string, remoteVideos: VideoRecord[]) => {
-    const result = mergeLessonCopies(videosRef.current, remoteVideos, deletionsRef.current);
+  const reconcileLessons = useCallback((
+    userId: string,
+    remoteVideos: VideoRecord[],
+    remoteLedgerLessons: Record<string, LessonTombstoneEntry> = {},
+  ) => {
+    const result = mergeLessonCopies(videosRef.current, remoteVideos, deletionsRef.current, remoteLedgerLessons);
+    videosRef.current = result.videos;
+    deletionsRef.current = result.deletions;
     setVideos(result.videos);
     setDeletions(result.deletions);
     // Anything the account already holds (and this device has not changed) needs no upload.
@@ -271,18 +348,199 @@ export default function App() {
       if (lastSyncedRef.current.get(videoId) !== updatedAt) lastSyncedRef.current.set(videoId, updatedAt);
     }
     pushPendingLessonDeletes(userId, result.pendingDeletes);
+
+    // If another device removed a lesson's PDF notes, clear any in-memory session copy too.
+    for (const videoId of result.clearedPdfIds) {
+      delete notesSessionRef.current[videoId];
+      deleteLocalAnnotations(`lesson:${videoId}`);
+      if (activeVideoIdRef.current === videoId) {
+        setPdfPreview(null);
+        setNotesRevision((value) => value + 1);
+      }
+    }
+
     const openId = activeVideoIdRef.current;
     if (openId && result.removedIds.includes(openId)) {
       // Stop the study room when the lesson on screen was deleted elsewhere, so playback
       // ticks cannot re-create the record that was just removed.
-      setSource(null);
-      setActiveVideoId(null);
-      setPdfPreview(null);
-      setNotesRevision((value) => value + 1);
+      closeActiveStudyRoom();
       showToast('This lesson was deleted on another device.');
+    } else if (openId && result.newlyArchivedIds.includes(openId)) {
+      // Also stop playback if the open lesson was moved to "Removed" on another device, so
+      // progress ticks here cannot silently un-remove it.
+      closeActiveStudyRoom();
+      showToast('This lesson was removed on another device.');
     }
     return result;
-  }, [pushPendingLessonDeletes, showToast]);
+  }, [closeActiveStudyRoom, pushPendingLessonDeletes, showToast]);
+
+  /**
+   * Reconcile the PDF library, "Recently deleted" (`pdf_trash`), and permanent PDF deletions
+   * across devices — whether or not the optional `pdf_trash` migration was run.
+   */
+  const reconcilePdfLibrary = useCallback((
+    userId: string,
+    remotePdfs: LibraryPdf[],
+    remoteTrash: Record<string, number> | null,
+    remoteLedgerPdfs: Record<string, PdfSyncEntry> = {},
+    ledgerAvailable = true,
+  ) => {
+    const sessionPdfs = libraryPdfsRef.current.filter((item) => item.sessionOnly);
+    const result = reconcilePdfState({
+      remotePdfs,
+      localSessionPdfs: sessionPdfs,
+      localSync: pdfSyncRef.current,
+      localTrashFallback: pdfTrashRef.current,
+      localDeletionsFallback: deletionsRef.current,
+      remoteTrash,
+      remoteLedgerPdfs,
+    });
+
+    libraryPdfsRef.current = result.items;
+    pdfTrashRef.current = result.trash;
+    pdfSyncRef.current = result.syncMap;
+    setLibraryPdfs(result.items);
+    setPdfTrash(result.trash);
+    setPdfSync(result.syncMap);
+    setTrashUnavailable(remoteTrash === null && !ledgerAvailable);
+
+    if (result.deletedIds.length > 0) {
+      let nextDel = deletionsRef.current;
+      for (const id of result.deletedIds) {
+        const at = result.syncMap[id]?.at ?? Date.now();
+        nextDel = withDeletion(nextDel, 'pdf', id, at);
+        deleteLocalAnnotations(id);
+      }
+      if (nextDel !== deletionsRef.current) {
+        deletionsRef.current = nextDel;
+        setDeletions(nextDel);
+      }
+    }
+
+    // Close the full-screen PDF reader if the PDF it displays was deleted or trashed elsewhere.
+    const survivingIds = new Set(result.items.map((item) => item.id));
+    setOpenLibraryPdf((current) => {
+      if (!current || current.sessionOnly) return current;
+      if (!survivingIds.has(current.id)) {
+        showToast('This PDF was deleted on another device.');
+        return null;
+      }
+      if (result.newlyTrashedIds.includes(current.id)) {
+        showToast('This PDF was moved to Recently deleted on another device.');
+        return null;
+      }
+      return current;
+    });
+
+    // Unlink any lesson whose attached library PDF was deleted forever on another device.
+    const liveLibraryPaths = new Set(
+      result.items.map((item) => item.storagePath).filter((path): path is string => Boolean(path)),
+    );
+    const unlinkedLessons: VideoRecord[] = [];
+    const currentVideos = videosRef.current;
+    let videosChanged = false;
+    const cleanedVideos = currentVideos.map((video) => {
+      if (video.pdfPath && isLibraryPath(video.pdfPath) && !liveLibraryPaths.has(video.pdfPath)) {
+        videosChanged = true;
+        const cleaned: VideoRecord = {
+          ...video,
+          pdfPath: undefined,
+          pdfName: undefined,
+          pdfSize: undefined,
+          updatedAt: nextLessonStamp(video.updatedAt),
+        };
+        unlinkedLessons.push(cleaned);
+        return cleaned;
+      }
+      return video;
+    });
+    if (videosChanged) {
+      videosRef.current = cleanedVideos;
+      setVideos(cleanedVideos);
+      for (const cleaned of unlinkedLessons) {
+        if (!isDeleted(deletionsRef.current, 'lesson', cleaned.videoId)) {
+          void saveCloudVideo(userId, cleaned)
+            .then(() => lastSyncedRef.current.set(cleaned.videoId, cleaned.updatedAt))
+            .catch(() => undefined);
+        }
+      }
+    }
+
+    // Retry / complete any pending account writes for PDF deletions, trashes, or restores.
+    for (const item of result.pendingHardDeletes) {
+      void deleteLibraryPdf(userId, item).catch(() => undefined);
+    }
+    for (const entry of result.pendingTrashWrites) {
+      void trashLibraryPdf(userId, entry.pdfId, entry.deletedAt).catch(() => undefined);
+    }
+    for (const pdfId of result.pendingRestores) {
+      void restoreLibraryPdf(userId, pdfId).catch(() => undefined);
+    }
+    if (Object.keys(result.ledgerPatch).length > 0) {
+      const patch = result.ledgerPatch;
+      const maxAt = Math.max(...Object.values(patch).map((entry) => entry.at), Date.now());
+      void pushCloudSyncLedger(userId, { pdfs: patch, signalAt: maxAt })
+        .then(({ available }) => {
+          if (!available) return;
+          setPdfSync((current) => {
+            let changed = false;
+            const next = { ...current };
+            for (const [id, sent] of Object.entries(patch)) {
+              const cur = next[id];
+              if (cur?.pending && cur.status === sent.status && cur.at === sent.at) {
+                next[id] = { status: cur.status, at: cur.at, ...(cur.deletedAt ? { deletedAt: cur.deletedAt } : {}) };
+                changed = true;
+              }
+            }
+            if (changed) pdfSyncRef.current = next;
+            return changed ? next : current;
+          });
+        })
+        .catch(() => undefined);
+    }
+  }, [showToast]);
+
+  /**
+   * Read the full account state (lessons, PDF library, `pdf_trash` and the sync ledger) and
+   * reconcile both shelves together. Concurrent refresh requests coalesce cleanly.
+   */
+  const refreshAccountState = useCallback(async (userId: string) => {
+    if (!supabase) return;
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    try {
+      const [videosRes, pdfsRes, trashRes, ledgerRes] = await Promise.allSettled([
+        fetchCloudVideos(userId),
+        fetchLibraryPdfs(userId),
+        fetchPdfTrashMap(userId),
+        fetchCloudSyncLedger(userId),
+      ]);
+      const ledgerRecord = ledgerRes.status === 'fulfilled' ? ledgerRes.value : null;
+      const ledgerAvailable = Boolean(ledgerRecord?.available);
+      if (videosRes.status === 'fulfilled') {
+        reconcileLessons(userId, videosRes.value, ledgerRecord?.ledger.lessons ?? {});
+      }
+      if (pdfsRes.status === 'fulfilled') {
+        const remoteTrash = trashRes.status === 'fulfilled' ? trashRes.value : null;
+        reconcilePdfLibrary(
+          userId,
+          pdfsRes.value,
+          remoteTrash,
+          ledgerRecord?.ledger.pdfs ?? {},
+          ledgerAvailable,
+        );
+      }
+    } finally {
+      refreshInFlightRef.current = false;
+      if (refreshQueuedRef.current) {
+        refreshQueuedRef.current = false;
+        void refreshAccountState(userId);
+      }
+    }
+  }, [reconcileLessons, reconcilePdfLibrary]);
 
   useEffect(() => {
     if (!cloudConfigured || !authReady || !authUser) {
@@ -301,13 +559,14 @@ export default function App() {
     fullReconcileRef.current = true;
     (async () => {
       try {
-        const [remoteVideos, capabilities] = await Promise.all([
+        const [remoteVideos, capabilities, ledgerRecord] = await Promise.all([
           fetchCloudVideos(authUser.id),
           watchItemCapabilities(),
+          fetchCloudSyncLedger(authUser.id).catch(() => null),
         ]);
         if (cancelled) return;
-        setDeleteSyncMissing(!capabilities.deletions);
-        reconcileLessons(authUser.id, remoteVideos);
+        setDeleteSyncMissing(!capabilities.sources && !capabilities.deletions);
+        reconcileLessons(authUser.id, remoteVideos, ledgerRecord?.ledger.lessons ?? {});
         setSyncedUserId(authUser.id);
         setSyncStatus('synced');
         setSyncMessage('Your study library is synced.');
@@ -319,35 +578,6 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [authReady, authUser?.id, reconcileLessons]);
-
-  /**
-   * Apply a fresh library fetch: drop PDFs deleted for good on any device, keep the files
-   * uploaded in this tab while signed out, and retry a delete the account has not accepted.
-   */
-  const applyLibrarySnapshot = useCallback((userId: string, remote: LibraryPdf[]) => {
-    const tombstones = deletionsRef.current;
-    for (const item of remote) {
-      if (isDeleted(tombstones, 'pdf', item.id)) void deleteLibraryPdf(userId, item).catch(() => undefined);
-    }
-    const remoteIds = new Set(remote.map((item) => item.id));
-    setLibraryPdfs((current) => sortLibrary([
-      ...withoutDeletedPdfs(remote, tombstones),
-      ...current.filter((item) => item.sessionOnly),
-    ]));
-    // The reader is closed when the PDF it shows was deleted for good, here or elsewhere.
-    setOpenLibraryPdf((current) => (current && !current.sessionOnly && !remoteIds.has(current.id) ? null : current));
-    // "Recently deleted" entries for PDFs that no longer exist anywhere are dropped.
-    const sessionIds = new Set(libraryPdfsRef.current.filter((item) => item.sessionOnly).map((item) => item.id));
-    setPdfTrash((current) => {
-      let changed = false;
-      const next: Record<string, number> = {};
-      for (const [id, deletedAt] of Object.entries(current)) {
-        if (remoteIds.has(id) || sessionIds.has(id)) next[id] = deletedAt;
-        else changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, []);
 
   /**
    * Give a direct video link a real thumbnail: the first frame, read off the video itself.
@@ -385,7 +615,8 @@ export default function App() {
     };
   }, [activeRecord?.videoId, activeRecord?.thumbnail, activeRecord?.sourceUrl, showToast, updateVideo]);
 
-  // Load the account-backed PDF library. Guest uploads (session-only) are kept alongside it.
+  // Load the account-backed PDF library, "Recently deleted" state, and per-PDF activity.
+  // Guest uploads (session-only) are kept alongside it and migrated below.
   useEffect(() => {
     libraryMigratedRef.current = false;
     if (!cloudConfigured || !authReady || !authUser) {
@@ -399,9 +630,37 @@ export default function App() {
     setLibraryLoading(true);
     (async () => {
       try {
-        const remote = await fetchLibraryPdfs(userId);
+        const [remotePdfs, remoteTrash, ledgerRecord, activityRes] = await Promise.all([
+          fetchLibraryPdfs(userId),
+          fetchPdfTrashMap(userId),
+          fetchCloudSyncLedger(userId).catch(() => null),
+          fetchPdfActivity(userId).catch(() => null),
+        ]);
         if (cancelled) return;
-        applyLibrarySnapshot(userId, remote);
+        reconcilePdfLibrary(
+          userId,
+          remotePdfs,
+          remoteTrash,
+          ledgerRecord?.ledger.pdfs ?? {},
+          Boolean(ledgerRecord?.available),
+        );
+        if (activityRes) {
+          const remoteActivity = Object.fromEntries(activityRes.map((entry) => [
+            entry.pdfId,
+            { lastOpenedAt: entry.lastOpenedAt, pageCount: entry.pageCount },
+          ]));
+          setPdfActivity((current) => {
+            const merged = { ...current };
+            for (const [pdfId, info] of Object.entries(remoteActivity)) {
+              const localInfo = merged[pdfId];
+              merged[pdfId] = {
+                lastOpenedAt: Math.max(localInfo?.lastOpenedAt ?? 0, info.lastOpenedAt ?? 0) || null,
+                pageCount: info.pageCount ?? localInfo?.pageCount ?? null,
+              };
+            }
+            return merged;
+          });
+        }
         setLibraryError('');
       } catch (error) {
         if (cancelled) return;
@@ -415,7 +674,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authReady, authUser?.id]);
+  }, [authReady, authUser?.id, reconcilePdfLibrary]);
 
   // When a guest signs in, move the PDFs uploaded in that tab into their account so they sync.
   useEffect(() => {
@@ -444,55 +703,6 @@ export default function App() {
     })();
   }, [authUser?.id, libraryLoadedFor, libraryPdfs, showToast]);
 
-  // "Recently deleted" and activity live in two small optional tables. If the owner has not
-  // run the newest migration yet, the library keeps working with local storage.
-  useEffect(() => {
-    if (!cloudConfigured || !authUser || libraryLoadedFor !== authUser.id || !supabase) return;
-    let cancelled = false;
-    (async () => {
-      const [trashResult, activityResult] = await Promise.allSettled([
-        fetchPdfTrash(authUser.id),
-        fetchPdfActivity(authUser.id),
-      ]);
-      if (cancelled) return;
-      if (trashResult.status === 'fulfilled') {
-        const remoteTrash = Object.fromEntries(trashResult.value.map((entry) => [entry.pdfId, entry.deletedAt]));
-        // The account is the source of truth for cloud PDFs: a PDF restored on another device
-        // has no `pdf_trash` row there, and merging the two lists as a union would keep showing
-        // it in "Recently deleted" here forever. Only this tab's guest uploads keep their entry.
-        setPdfTrash((current) => {
-          const sessionIds = new Set(libraryPdfsRef.current.filter((item) => item.sessionOnly).map((item) => item.id));
-          const kept: Record<string, number> = {};
-          for (const [id, deletedAt] of Object.entries(current)) {
-            if (sessionIds.has(id)) kept[id] = deletedAt;
-          }
-          return { ...kept, ...remoteTrash };
-        });
-        setTrashUnavailable(false);
-      } else {
-        setTrashUnavailable(true);
-      }
-      if (activityResult.status === 'fulfilled') {
-        const remoteActivity = Object.fromEntries(activityResult.value.map((entry) => [
-          entry.pdfId,
-          { lastOpenedAt: entry.lastOpenedAt, pageCount: entry.pageCount },
-        ]));
-        setPdfActivity((current) => {
-          const merged = { ...current };
-          for (const [pdfId, info] of Object.entries(remoteActivity)) {
-            const localInfo = merged[pdfId];
-            merged[pdfId] = {
-              lastOpenedAt: Math.max(localInfo?.lastOpenedAt ?? 0, info.lastOpenedAt ?? 0) || null,
-              pageCount: info.pageCount ?? localInfo?.pageCount ?? null,
-            };
-          }
-          return merged;
-        });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [authUser?.id, libraryLoadedFor]);
-
   // PDF drawings reach other devices through two tables. If this project has not had those
   // migrations run, say so as soon as the account loads, rather than only when a drawing
   // fails to save. The reader itself keeps working in this browser either way.
@@ -518,22 +728,35 @@ export default function App() {
       fullReconcileRef.current = false;
       return;
     }
-    const pending = videos.filter((video) => fullReconcile || lastSyncedRef.current.get(video.videoId) !== video.updatedAt);
+    const pending = videos.filter((video) => (
+      !isDeleted(deletionsRef.current, 'lesson', video.videoId)
+      && (fullReconcile || lastSyncedRef.current.get(video.videoId) !== video.updatedAt)
+    ));
     if (pending.length === 0) return;
     const userId = authUser.id;
     const timeout = window.setTimeout(async () => {
+      const stillPending = pending.filter((video) => !isDeleted(deletionsRef.current, 'lesson', video.videoId));
+      if (stillPending.length === 0) {
+        fullReconcileRef.current = false;
+        return;
+      }
       setSyncStatus('syncing');
       try {
         // Writes stay independent: one failing lesson must not block the others.
-        const results = await Promise.allSettled(pending.map(async (video) => {
+        const results = await Promise.allSettled(stillPending.map(async (video) => {
           await saveCloudVideo(userId, video);
           return video;
         }));
         const failed: VideoRecord[] = [];
         results.forEach((result, index) => {
-          const video = pending[index];
-          if (result.status === 'fulfilled') lastSyncedRef.current.set(video.videoId, video.updatedAt);
-          else failed.push(video);
+          const video = stillPending[index];
+          if (result.status === 'fulfilled') {
+            if (!isDeleted(deletionsRef.current, 'lesson', video.videoId)) {
+              lastSyncedRef.current.set(video.videoId, video.updatedAt);
+            }
+          } else {
+            failed.push(video);
+          }
         });
         if (failed.length > 0) {
           const reason = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
@@ -551,41 +774,80 @@ export default function App() {
   }, [videos, authUser?.id, syncedUserId]);
 
   /**
-   * Another device can delete a lesson or a PDF while this tab is open. A row that simply
-   * disappears cannot tell a cached copy that anything changed, so the app re-reads the
-   * account whenever the tab regains focus and every 40 s while it is visible.
+   * Live + background cross-device sync for deletions, removals, restores and uploads:
+   *   1. Subscribes to the account sync ledger over Supabase Realtime so an open tab on a
+   *      second device reacts in milliseconds when anything is deleted or restored.
+   *   2. Flushes pending lesson updates on tab hide / pagehide so closing a tab never drops
+   *      a removal or progress update still waiting on the debounce.
+   *   3. Re-reads the full account state on focus, visibility, reconnect, and every 15 s.
    */
   useEffect(() => {
     if (!supabase || !authUser || syncedUserId !== authUser.id) return;
     const userId = authUser.id;
     let stopped = false;
+
+    const flushPendingVideos = () => {
+      const unsent = videosRef.current.filter((video) => (
+        !isDeleted(deletionsRef.current, 'lesson', video.videoId)
+        && lastSyncedRef.current.get(video.videoId) !== video.updatedAt
+      ));
+      for (const video of unsent) {
+        void saveCloudVideo(userId, video)
+          .then(() => {
+            if (!isDeleted(deletionsRef.current, 'lesson', video.videoId)) {
+              lastSyncedRef.current.set(video.videoId, video.updatedAt);
+            }
+          })
+          .catch(() => undefined);
+      }
+    };
+
     const refresh = () => {
       if (stopped || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) return;
-      void fetchCloudVideos(userId)
-        .then((remote) => { if (!stopped) reconcileLessons(userId, remote); })
-        .catch(() => undefined);
-      void fetchLibraryPdfs(userId)
-        .then((remote) => { if (!stopped) applyLibrarySnapshot(userId, remote); })
-        .catch(() => undefined);
+      void refreshAccountState(userId);
     };
-    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+
+    const unsubscribe = subscribeCloudSyncLedger(userId, () => {
+      if (!stopped) void refreshAccountState(userId);
+    });
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushPendingVideos();
+      else refresh();
+    };
+    const onOnline = () => {
+      flushPendingVideos();
+      void refreshAccountState(userId);
+    };
+
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', onVisibility);
-    const timer = window.setInterval(refresh, 40000);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('pagehide', flushPendingVideos);
+    const timer = window.setInterval(refresh, 15000);
     return () => {
       stopped = true;
+      unsubscribe();
       window.clearInterval(timer);
       window.removeEventListener('focus', refresh);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('pagehide', flushPendingVideos);
     };
-  }, [authUser?.id, syncedUserId, reconcileLessons, applyLibrarySnapshot]);
+  }, [authUser?.id, syncedUserId, refreshAccountState]);
 
   useEffect(() => {
     if (!activeVideoId) return;
     setVideos((current) => {
       const existing = current.find((video) => video.videoId === activeVideoId);
       if (!existing || existing.chaptersRaw === chaptersRaw) return current;
-      return upsertVideo(current, { ...existing, chaptersRaw, updatedAt: Date.now() });
+      const next = upsertVideo(current, {
+        ...existing,
+        chaptersRaw,
+        updatedAt: nextLessonStamp(existing.updatedAt),
+      });
+      videosRef.current = next;
+      return next;
     });
   }, [chaptersRaw, activeVideoId]);
 
@@ -611,6 +873,11 @@ export default function App() {
       }).finally(() => { if (!cancelled) setPdfLoading(false); });
       return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
     }
+    if (record?.pdfPath && trashedLibraryPaths.has(record.pdfPath)) {
+      // A library PDF moved to "Recently deleted" stays hidden until restored.
+      setPdfLoading(false);
+      return () => { cancelled = true; };
+    }
     if (record?.pdfPath && authUser && supabase) {
       setPdfLoading(true);
       createPdfSignedUrl(record.pdfPath).then((url) => {
@@ -622,7 +889,7 @@ export default function App() {
       setPdfLoading(false);
     }
     return () => { cancelled = true; };
-  }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesVersion]);
+  }, [activeVideoId, activeRecord?.pdfPath, activeRecord?.pdfName, activeRecord?.pdfSize, authUser?.id, notesVersion, sessionPdf, trashedLibraryPaths]);
 
   // Resolve the URL for the PDF opened from the library (object URL for guests, signed link for accounts).
   useEffect(() => {
@@ -690,6 +957,7 @@ export default function App() {
     const existing = videosRef.current.find((video) => video.videoId === info.videoId);
     const kind = sourceRef.current?.kind === 'file' ? 'file' : existing?.sourceKind === 'file' ? 'file' : 'youtube';
     const record = existing ?? emptyVideoRecord(info.videoId, selectedSubject, kind);
+    const prevTombstone = deletionsRef.current[deletionKey('lesson', info.videoId)] ?? 0;
     const updated: VideoRecord = {
       ...record,
       sourceKind: kind,
@@ -701,9 +969,11 @@ export default function App() {
       playlistId: playlistIdRef.current || record.playlistId,
       playlistIndex: info.playlistIndex ?? record.playlistIndex,
       archived: false,
-      updatedAt: Date.now(),
+      updatedAt: nextLessonStamp(record.updatedAt, prevTombstone),
     };
-    setVideos((current) => upsertVideo(current, updated));
+    const nextList = upsertVideo(videosRef.current, updated);
+    videosRef.current = nextList;
+    setVideos(nextList);
     setActiveVideoId(info.videoId);
     setPlayerReady(true);
     lastProgressSaveRef.current = -1;
@@ -762,26 +1032,48 @@ export default function App() {
         const existing = videosRef.current.find((video) => video.videoId === videoId);
         // Opening a lesson that was deleted — here or on another device — is the one thing
         // that lifts its tombstone. A cached copy alone never does (see lessonSync.ts).
-        const wasDeleted = isDeleted(deletionsRef.current, 'lesson', videoId);
+        const prevTombstone = deletionsRef.current[deletionKey('lesson', videoId)] ?? 0;
+        const wasDeleted = prevTombstone > 0;
+        const revivedAt = nextLessonStamp(existing?.updatedAt ?? 0, prevTombstone);
         if (wasDeleted) {
-          setDeletions((current) => withoutDeletion(current, 'lesson', videoId));
-          deletionsRef.current = withoutDeletion(deletionsRef.current, 'lesson', videoId);
+          const cleared = withoutDeletion(deletionsRef.current, 'lesson', videoId);
+          deletionsRef.current = cleared;
+          setDeletions(cleared);
           lastSyncedRef.current.delete(videoId);
         }
-        const record: VideoRecord = existing ?? (isFile
+        const baseRecord: VideoRecord = existing ?? (isFile
           ? fileVideoRecord(parsed.fileUrl as string, subjectOverride ?? selectedSubject)
           : emptyVideoRecord(videoId, subjectOverride ?? selectedSubject));
+        const record: VideoRecord = {
+          ...baseRecord,
+          archived: false,
+          updatedAt: revivedAt,
+        };
         startPlaylistIndex = record.playlistIndex;
         startSeconds = record.currentTime > 3 ? record.currentTime : undefined;
-        if (!existing) setVideos((current) => upsertVideo(current, record));
-        else if (record.archived) updateVideo(record.videoId, { archived: false });
+        if (!existing) {
+          const nextList = upsertVideo(videosRef.current, record);
+          videosRef.current = nextList;
+          setVideos(nextList);
+        } else if (existing.archived || wasDeleted) {
+          const unarchived = updateVideo(record.videoId, { archived: false, updatedAt: revivedAt });
+          if (!wasDeleted) pushVideoNow(unarchived, true);
+        }
         if (wasDeleted && authUser && supabase) {
-          // Clear the account tombstone straight away, so a refresh cannot hide it again
-          // while the debounced library upload is still waiting.
-          const revived: VideoRecord = { ...record, updatedAt: Date.now() };
-          void clearCloudVideoDeletion(authUser.id, videoId)
-            .then(() => saveCloudVideo(authUser.id, revived))
-            .then(() => lastSyncedRef.current.set(videoId, revived.updatedAt))
+          // Clear the account tombstone straight away (with a monotonic revival timestamp),
+          // so a refresh cannot hide it again even if another device's clock was ahead.
+          const userId = authUser.id;
+          void clearCloudVideoDeletion(userId, videoId, revivedAt)
+            .then(() => saveCloudVideo(userId, record))
+            .then(() => {
+              if (!isDeleted(deletionsRef.current, 'lesson', videoId)) {
+                lastSyncedRef.current.set(videoId, record.updatedAt);
+              }
+              return pushCloudSyncLedger(userId, {
+                lessons: { [videoId]: { status: 'active', at: revivedAt } },
+                signalAt: revivedAt,
+              });
+            })
             .catch(() => undefined);
         }
         setActiveVideoId(videoId);
@@ -852,12 +1144,19 @@ export default function App() {
   function renameVideo(record: VideoRecord, title: string, subject: Subject) {
     const nextTitle = title.trim().slice(0, 160);
     if (!nextTitle) return;
-    updateVideo(record.videoId, { title: nextTitle, subject });
+    const updated = updateVideo(record.videoId, { title: nextTitle, subject });
+    pushVideoNow(updated, true);
     showToast('Lesson renamed.');
   }
 
   function archiveVideo(record: VideoRecord) {
-    updateVideo(record.videoId, { archived: true });
+    // Stop playback first when the active lesson is removed so player callbacks cannot
+    // overwrite `archived: true` back to `false` a moment later.
+    if (activeVideoId === record.videoId) {
+      closeActiveStudyRoom();
+    }
+    const updated = updateVideo(record.videoId, { archived: true });
+    pushVideoNow(updated, true);
     showToast('Removed from your library. You can restore it from Removed.');
   }
 
@@ -888,11 +1187,24 @@ export default function App() {
     }
     setLibraryError('');
     if (authUser && supabase && cloudConfigured) {
+      const userId = authUser.id;
       setLibraryBusy(true);
       setLibraryStatus(`Uploading “${file.name}”…`);
       try {
-        const created = await createLibraryPdf(authUser.id, file, subject);
-        setLibraryPdfs((current) => sortLibrary([created, ...current]));
+        const created = await createLibraryPdf(userId, file, subject);
+        const nextList = sortLibrary([created, ...libraryPdfsRef.current]);
+        libraryPdfsRef.current = nextList;
+        setLibraryPdfs(nextList);
+        const syncEntry: PdfSyncEntry = { status: 'active', at: created.updatedAt };
+        setPdfSync((current) => {
+          const next = { ...current, [created.id]: syncEntry };
+          pdfSyncRef.current = next;
+          return next;
+        });
+        void pushCloudSyncLedger(userId, {
+          pdfs: { [created.id]: syncEntry },
+          signalAt: created.updatedAt,
+        }).catch(() => undefined);
         setLibraryStatus('Saved to your private library.');
         showToast('PDF added to your library.');
       } catch (error) {
@@ -937,16 +1249,46 @@ export default function App() {
   /** Deleting from the library moves the PDF to "Recently deleted" so it can be restored or deleted forever. */
   async function deleteLibraryItem(item: LibraryPdf) {
     setLibraryError('');
-    const deletedAt = Date.now();
-    setPdfTrash((current) => ({ ...current, [item.id]: deletedAt }));
+    const prevAt = pdfSyncRef.current[item.id]?.at ?? pdfTrashRef.current[item.id] ?? 0;
+    const deletedAt = nextLessonStamp(prevAt, item.updatedAt);
+
+    setPdfTrash((current) => {
+      const next = { ...current, [item.id]: deletedAt };
+      pdfTrashRef.current = next;
+      return next;
+    });
+    if (!item.sessionOnly) {
+      const syncEntry: LocalPdfSyncEntry = { status: 'trashed', at: deletedAt, deletedAt, pending: true };
+      setPdfSync((current) => {
+        const next = { ...current, [item.id]: syncEntry };
+        pdfSyncRef.current = next;
+        return next;
+      });
+    }
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
     showToast('PDF moved to Recently deleted.');
 
     if (!item.sessionOnly && authUser && supabase) {
-      try {
-        await trashLibraryPdf(authUser.id, item.id);
-      } catch {
-        // Fail soft if the optional pdf_trash table is not migrated yet; local trash still persists.
+      const userId = authUser.id;
+      const [trashRes, ledgerRes] = await Promise.allSettled([
+        trashLibraryPdf(userId, item.id, deletedAt),
+        pushCloudSyncLedger(userId, {
+          pdfs: { [item.id]: { status: 'trashed', at: deletedAt, deletedAt } },
+          signalAt: deletedAt,
+        }),
+      ]);
+      const trashTableOk = trashRes.status === 'fulfilled';
+      const ledgerOk = ledgerRes.status === 'fulfilled' && ledgerRes.value.available;
+      if (trashTableOk || ledgerOk) {
+        setTrashUnavailable(false);
+        setPdfSync((current) => {
+          const cur = current[item.id];
+          if (!cur || cur.status !== 'trashed' || cur.at !== deletedAt) return current;
+          const next = { ...current, [item.id]: { status: 'trashed' as const, at: deletedAt, deletedAt } };
+          pdfSyncRef.current = next;
+          return next;
+        });
+      } else if (ledgerRes.status === 'fulfilled' && !ledgerRes.value.available) {
         setTrashUnavailable(true);
       }
     }
@@ -955,17 +1297,46 @@ export default function App() {
   /** Bring a PDF back from "Recently deleted". Nothing was removed from storage. */
   async function restoreTrashedPdf(item: LibraryPdf) {
     setLibraryError('');
+    const prevAt = pdfSyncRef.current[item.id]?.at ?? pdfTrashRef.current[item.id] ?? 0;
+    const restoredAt = nextLessonStamp(prevAt, item.updatedAt);
+
     setPdfTrash((current) => {
       const next = { ...current };
       delete next[item.id];
+      pdfTrashRef.current = next;
       return next;
     });
+    if (!item.sessionOnly) {
+      const syncEntry: LocalPdfSyncEntry = { status: 'active', at: restoredAt, pending: true };
+      setPdfSync((current) => {
+        const next = { ...current, [item.id]: syncEntry };
+        pdfSyncRef.current = next;
+        return next;
+      });
+    }
     showToast('PDF restored to your library.');
 
     if (!item.sessionOnly && authUser && supabase) {
-      try {
-        await restoreLibraryPdf(authUser.id, item.id);
-      } catch {
+      const userId = authUser.id;
+      const [restoreRes, ledgerRes] = await Promise.allSettled([
+        restoreLibraryPdf(userId, item.id),
+        pushCloudSyncLedger(userId, {
+          pdfs: { [item.id]: { status: 'active', at: restoredAt } },
+          signalAt: restoredAt,
+        }),
+      ]);
+      const restoreTableOk = restoreRes.status === 'fulfilled';
+      const ledgerOk = ledgerRes.status === 'fulfilled' && ledgerRes.value.available;
+      if (restoreTableOk || ledgerOk) {
+        setTrashUnavailable(false);
+        setPdfSync((current) => {
+          const cur = current[item.id];
+          if (!cur || cur.status !== 'active' || cur.at !== restoredAt) return current;
+          const next = { ...current, [item.id]: { status: 'active' as const, at: restoredAt } };
+          pdfSyncRef.current = next;
+          return next;
+        });
+      } else if (ledgerRes.status === 'fulfilled' && !ledgerRes.value.available) {
         setTrashUnavailable(true);
       }
     }
@@ -974,35 +1345,44 @@ export default function App() {
   /** "Delete forever": removes the file from storage and the row from the library. */
   async function deleteLibraryItemForever(item: LibraryPdf) {
     setLibraryError('');
-    // Remembered locally so the PDF cannot come back from another device's stale list while
-    // (or if) the account delete is not accepted. `applyLibrarySnapshot` retries it.
-    setDeletions((current) => withDeletion(current, 'pdf', item.id, Date.now()));
-    if (!item.sessionOnly && authUser && supabase) {
-      setLibraryBusy(true);
-      try {
-        await deleteLibraryPdf(authUser.id, item);
-      } catch (error) {
-        setLibraryBusy(false);
-        setLibraryError(error instanceof Error
-          ? `Could not delete this PDF for good. ${error.message}`
-          : 'Could not delete this PDF for good.');
-        return;
-      }
-      setLibraryBusy(false);
+    const prevDel = deletionsRef.current[deletionKey('pdf', item.id)] ?? 0;
+    const prevSync = pdfSyncRef.current[item.id]?.at ?? pdfTrashRef.current[item.id] ?? 0;
+    const deletedAt = nextLessonStamp(Math.max(prevSync, item.updatedAt), prevDel);
+
+    // Record the tombstone locally first so even if the network drops mid-delete, this PDF
+    // stays gone here and `reconcilePdfLibrary` finishes removing it on reconnect.
+    const nextDel = withDeletion(deletionsRef.current, 'pdf', item.id, deletedAt);
+    deletionsRef.current = nextDel;
+    setDeletions(nextDel);
+    if (!item.sessionOnly) {
+      const syncEntry: LocalPdfSyncEntry = { status: 'deleted', at: deletedAt, pending: true };
+      setPdfSync((current) => {
+        const next = { ...current, [item.id]: syncEntry };
+        pdfSyncRef.current = next;
+        return next;
+      });
     }
 
     // Any lesson still pointing at this PDF keeps its timestamps — only the notes link clears.
     if (item.storagePath) {
-      setVideos((current) => current.map((video) => (
-        video.pdfPath && video.pdfPath === item.storagePath
-          ? { ...video, pdfPath: undefined, pdfName: undefined, pdfSize: undefined, updatedAt: Date.now() }
-          : video
-      )));
+      const affected = videosRef.current.filter((video) => video.pdfPath && video.pdfPath === item.storagePath);
+      for (const video of affected) {
+        const updated = updateVideo(video.videoId, {
+          pdfPath: undefined,
+          pdfName: undefined,
+          pdfSize: undefined,
+        });
+        pushVideoNow(updated, false);
+      }
     }
-    setLibraryPdfs((current) => current.filter((entry) => entry.id !== item.id));
+
+    const nextItems = libraryPdfsRef.current.filter((entry) => entry.id !== item.id);
+    libraryPdfsRef.current = nextItems;
+    setLibraryPdfs(nextItems);
     setPdfTrash((current) => {
       const next = { ...current };
       delete next[item.id];
+      pdfTrashRef.current = next;
       return next;
     });
     setPdfActivity((current) => {
@@ -1012,23 +1392,53 @@ export default function App() {
     });
     deleteLocalAnnotations(item.id);
     if (openLibraryPdf?.id === item.id) setOpenLibraryPdf(null);
-    showToast('PDF deleted forever.');
+
+    let syncedToCloud = true;
+    if (!item.sessionOnly && authUser && supabase) {
+      const userId = authUser.id;
+      setLibraryBusy(true);
+      const [delRes, ledgerRes] = await Promise.allSettled([
+        deleteLibraryPdf(userId, item),
+        pushCloudSyncLedger(userId, {
+          pdfs: { [item.id]: { status: 'deleted', at: deletedAt } },
+          signalAt: deletedAt,
+        }),
+      ]);
+      setLibraryBusy(false);
+      if (delRes.status === 'rejected') {
+        syncedToCloud = false;
+        console.warn('Could not delete this PDF from the account yet:', delRes.reason);
+      } else if (ledgerRes.status === 'fulfilled') {
+        setPdfSync((current) => {
+          const cur = current[item.id];
+          if (!cur || cur.status !== 'deleted' || cur.at !== deletedAt) return current;
+          const next = { ...current, [item.id]: { status: 'deleted' as const, at: deletedAt } };
+          pdfSyncRef.current = next;
+          return next;
+        });
+      }
+    }
+
+    showToast(syncedToCloud
+      ? 'PDF deleted forever.'
+      : 'Deleted here. Your account was unreachable, so it will retry automatically.');
   }
 
   async function renameLibraryItem(item: LibraryPdf, name: string, subject: Subject) {
     const nextName = name.toLowerCase().endsWith('.pdf') ? name : `${name}.pdf`;
-    const updated: LibraryPdf = { ...item, name: nextName, subject, updatedAt: Date.now() };
+    const updated: LibraryPdf = { ...item, name: nextName, subject, updatedAt: nextLessonStamp(item.updatedAt) };
     setLibraryPdfs((current) => sortLibrary(current.map((entry) => (entry.id === item.id ? updated : entry))));
     setOpenLibraryPdf((current) => (current && current.id === item.id ? updated : current));
     if (item.sessionOnly || !authUser || !supabase) return;
     setLibraryError('');
     try {
       await updateLibraryPdf(authUser.id, item.id, { name: nextName, subject });
-      setVideos((current) => current.map((video) => (
-        video.pdfPath && video.pdfPath === item.storagePath
-          ? { ...video, pdfName: nextName, updatedAt: Date.now() }
-          : video
-      )));
+      const affected = videosRef.current.filter((video) => video.pdfPath && video.pdfPath === item.storagePath);
+      for (const video of affected) {
+        const renamedLesson = updateVideo(video.videoId, { pdfName: nextName });
+        pushVideoNow(renamedLesson, false);
+      }
+      void pushCloudSyncLedger(authUser.id, { signalAt: updated.updatedAt }).catch(() => undefined);
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : 'Could not rename this PDF.');
     }
@@ -1086,7 +1496,8 @@ export default function App() {
     setLibraryError('');
     // A lesson-level PDF would shadow the library copy, so clear it before linking.
     delete notesSessionRef.current[activeVideoId];
-    updateVideo(activeVideoId, { pdfPath: item.storagePath, pdfName: item.name, pdfSize: item.size });
+    const updated = updateVideo(activeVideoId, { pdfPath: item.storagePath, pdfName: item.name, pdfSize: item.size });
+    pushVideoNow(updated, true);
     setNotesRevision((value) => value + 1);
     setPdfError('');
     setPdfStatus('');
@@ -1145,7 +1556,12 @@ export default function App() {
           // A PDF linked from the library is never deleted when a lesson replaces its notes.
           const previousPath = isLibraryPath(record?.pdfPath) ? undefined : record?.pdfPath;
           const path = await uploadCloudPdf(authUser.id, activeVideoId, file, previousPath);
-          updateVideo(activeVideoId, { pdfPath: path, pdfName: file.name, pdfSize: file.size });
+          // Drop the temporary in-memory data URL once cloud storage holds the file, so a
+          // later cross-device removal clears the preview cleanly instead of being shadowed.
+          delete notesSessionRef.current[activeVideoId];
+          const updated = updateVideo(activeVideoId, { pdfPath: path, pdfName: file.name, pdfSize: file.size });
+          pushVideoNow(updated, true);
+          setNotesRevision((value) => value + 1);
           setPdfStatus('Saved to your private cloud library.');
           showToast('PDF notes synced to your account.');
         } catch (error) {
@@ -1178,7 +1594,8 @@ export default function App() {
     if (authUser && supabase && !linkedLibraryPdf) {
       void deleteCloudLessonAnnotations(authUser.id, activeVideoId).catch(() => undefined);
     }
-    updateVideo(activeVideoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
+    const updated = updateVideo(activeVideoId, { pdfPath: undefined, pdfName: undefined, pdfSize: undefined });
+    pushVideoNow(updated, true);
     setPdfPreview(null);
     setNotesRevision((value) => value + 1);
     setPdfStatus('');
@@ -1208,7 +1625,8 @@ export default function App() {
   }
 
   function restoreVideo(record: VideoRecord) {
-    updateVideo(record.videoId, { archived: false });
+    const updated = updateVideo(record.videoId, { archived: false });
+    pushVideoNow(updated, true);
     if (removedVideos.length <= 1) setLibraryFilter('all');
     showToast('Lesson restored to your library.');
   }
@@ -1220,16 +1638,33 @@ export default function App() {
   async function deleteVideoForever(record: VideoRecord) {
     const keepLibraryPdf = pdfLinkedFromLibrary(record.pdfPath);
     const removesLessonPdf = Boolean(record.pdfPath) && !keepLibraryPdf;
-    const deletedAt = Date.now();
+    const prevDel = deletionsRef.current[deletionKey('lesson', record.videoId)] ?? 0;
+    const deletedAt = nextLessonStamp(record.updatedAt, prevDel);
 
     // The tombstone is written here first, on purpose: even if the account write below fails
     // (offline, or an older project), this device must never merge the lesson back. The
     // sign-in / focus refresh retries the account write for every pending tombstone.
-    setDeletions((current) => withDeletion(current, 'lesson', record.videoId, deletedAt));
+    const nextDel = withDeletion(deletionsRef.current, 'lesson', record.videoId, deletedAt);
+    deletionsRef.current = nextDel;
+    setDeletions(nextDel);
     lastSyncedRef.current.delete(record.videoId);
 
+    delete notesSessionRef.current[record.videoId];
+    deleteLocalAnnotations(`lesson:${record.videoId}`);
+    const nextVideos = videosRef.current.filter((video) => video.videoId !== record.videoId);
+    videosRef.current = nextVideos;
+    setVideos(nextVideos);
+    // Stop the study room when the lesson on screen is the one being deleted, so playback
+    // ticks cannot re-create the record that was just removed.
+    if (activeVideoId === record.videoId) {
+      closeActiveStudyRoom();
+    }
+    if (removedVideos.length <= 1) setLibraryFilter('all');
+
+    let syncedToCloud = true;
     setLibraryError('');
     if (authUser && supabase) {
+      const userId = authUser.id;
       if (removesLessonPdf) {
         try {
           await deleteCloudPdf(record.pdfPath as string);
@@ -1237,34 +1672,26 @@ export default function App() {
           // Proceed even if the storage object was already removed.
         }
       }
+      void deleteCloudLessonAnnotations(userId, record.videoId).catch(() => undefined);
       setLibraryBusy(true);
-      try {
-        await deleteCloudVideo(authUser.id, record.videoId, deletedAt);
-      } catch (error) {
-        // Keep the lesson deleted here and retry later; say so instead of making it reappear.
-        console.warn('Could not remove this lesson from the account yet:', error);
-        showToast('Deleted here. Your account was unreachable, so it will retry automatically.');
-      }
+      const [videoDelRes, ledgerRes] = await Promise.allSettled([
+        deleteCloudVideo(userId, record.videoId, deletedAt),
+        pushCloudSyncLedger(userId, {
+          lessons: { [record.videoId]: { status: 'deleted', at: deletedAt } },
+          signalAt: deletedAt,
+        }),
+      ]);
       setLibraryBusy(false);
+      const ledgerOk = ledgerRes.status === 'fulfilled' && ledgerRes.value.available;
+      if (videoDelRes.status === 'rejected' && !ledgerOk) {
+        syncedToCloud = false;
+        console.warn('Could not remove this lesson from the account yet:', videoDelRes.reason);
+      }
     }
 
-    delete notesSessionRef.current[record.videoId];
-    deleteLocalAnnotations(`lesson:${record.videoId}`);
-    // Fail soft: a project that has not run the newest migration simply has no such table.
-    if (authUser && supabase) {
-      void deleteCloudLessonAnnotations(authUser.id, record.videoId).catch(() => undefined);
-    }
-    setVideos((current) => current.filter((video) => video.videoId !== record.videoId));
-    // Stop the study room when the lesson on screen is the one being deleted, so playback
-    // ticks cannot re-create the record that was just removed.
-    if (activeVideoId === record.videoId) {
-      setSource(null);
-      setActiveVideoId(null);
-      setPdfPreview(null);
-      setNotesRevision((value) => value + 1);
-    }
-    if (removedVideos.length <= 1) setLibraryFilter('all');
-    showToast('Lesson deleted forever.');
+    showToast(syncedToCloud
+      ? 'Lesson deleted forever.'
+      : 'Deleted here. Your account was unreachable, so it will retry automatically.');
   }
 
   useEffect(() => {
@@ -1586,6 +2013,7 @@ export default function App() {
                         video={video}
                         removed
                         active={video.videoId === activeVideoId}
+                        pdfHidden={Boolean(video.pdfPath && trashedLibraryPaths.has(video.pdfPath))}
                         onResume={() => resumeVideo(video)}
                         onRestore={() => restoreVideo(video)}
                         onDeleteForever={() => void deleteVideoForever(video)}
@@ -1597,6 +2025,7 @@ export default function App() {
                         key={video.videoId}
                         video={video}
                         active={video.videoId === activeVideoId}
+                        pdfHidden={Boolean(video.pdfPath && trashedLibraryPaths.has(video.pdfPath))}
                         onResume={() => resumeVideo(video)}
                         onRemove={() => archiveVideo(video)}
                         onRename={(title, subject) => renameVideo(video, title, subject)}
@@ -1640,6 +2069,8 @@ interface LibraryCardProps {
   active: boolean;
   /** Removed (archived) lessons show Restore + Delete forever instead of Remove. */
   removed?: boolean;
+  /** Hide the PDF badge while the linked library PDF sits in "Recently deleted". */
+  pdfHidden?: boolean;
   onResume: () => void;
   onRemove?: () => void;
   onRestore?: () => void;
@@ -1649,7 +2080,7 @@ interface LibraryCardProps {
 }
 
 function LibraryCard({
-  video, active, removed = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
+  video, active, removed = false, pdfHidden = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
 }: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
   const [editing, setEditing] = useState(false);
@@ -1683,7 +2114,7 @@ function LibraryCard({
           <span className={`subject-tag ${subjectClass(editing ? draftSubject : video.subject)}`}>{editing ? draftSubject : video.subject}</span>
           <span className="library-card-tools">
             {!editing && video.sourceKind === 'file' && <span className="library-source-badge" title={video.sourceUrl || 'Direct video link'}>LINK</span>}
-            {!editing && video.pdfName && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
+            {!editing && video.pdfName && !pdfHidden && <span className="library-notes-badge" title={video.pdfName}><FileText size={13} /> PDF</span>}
             {!editing && onRename && (
               <button className="library-rename-button" onClick={startEditing} aria-label={`Rename ${video.title}`} title="Rename lesson"><Pencil size={13} /></button>
             )}
