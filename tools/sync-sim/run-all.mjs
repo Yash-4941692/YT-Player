@@ -75,4 +75,12 @@ if (deletionCheck.status !== 0) {
   process.exit(1);
 }
 
+// File & PDF library deletions, soft-trash, restores, PDF detachments, clock skew & missing tables.
+console.log('\n• file, PDF library & lesson deletions across devices, clock skew and missing migrations');
+const fileDeleteCheck = spawnSync(process.execPath, [join(here, 'file-delete.mjs')], { cwd: root, stdio: 'inherit' });
+if (fileDeleteCheck.status !== 0) {
+  console.log('\nFAIL — cross-device file/PDF deletion checks failed.');
+  process.exit(1);
+}
+
 console.log('\nAll cross-device sync checks passed.');

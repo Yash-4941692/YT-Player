@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { emptySyncLedger, mergeSyncLedgers, nextLessonStamp, normalizeSyncLedger, type SyncLedger } from './lessonSync';
 import { newLibraryId } from './pdfLibrary';
 import type { LessonSourceKind, LibraryPdf, Subject, VideoRecord } from '../types';
 
@@ -85,6 +86,7 @@ export interface WatchItemCapabilities {
 
 const NO_CAPABILITIES: WatchItemCapabilities = { deletions: false, sources: false };
 let capabilitiesPromise: Promise<WatchItemCapabilities> | null = null;
+let pdfTrashTableMissing = false;
 
 function isMissingColumnError(error: { message?: string; code?: string } | null): boolean {
   if (!error) return false;
@@ -100,19 +102,34 @@ export function watchItemCapabilities(): Promise<WatchItemCapabilities> {
   if (!supabase) return Promise.resolve(NO_CAPABILITIES);
   if (!capabilitiesPromise) {
     const client = supabase;
-    capabilitiesPromise = (async () => {
+    let probe: Promise<WatchItemCapabilities> | null = null;
+    probe = (async (): Promise<WatchItemCapabilities> => {
       const deletions = await client.from('watch_items').select('deleted_at').limit(1);
-      if (isMissingColumnError(deletions.error)) return NO_CAPABILITIES;
+      if (deletions.error) {
+        if (isMissingColumnError(deletions.error)) return NO_CAPABILITIES;
+        // Transient network / auth failure: do not poison the capability cache for the whole tab.
+        if (capabilitiesPromise === probe) capabilitiesPromise = null;
+        return { deletions: true, sources: true };
+      }
       const sources = await client.from('watch_items').select('source_kind, source_url').limit(1);
+      if (sources.error && !isMissingColumnError(sources.error)) {
+        if (capabilitiesPromise === probe) capabilitiesPromise = null;
+        return { deletions: true, sources: true };
+      }
       return { deletions: true, sources: !isMissingColumnError(sources.error) };
-    })().catch(() => NO_CAPABILITIES);
+    })().catch(() => {
+      if (capabilitiesPromise === probe) capabilitiesPromise = null;
+      return NO_CAPABILITIES;
+    });
+    capabilitiesPromise = probe;
   }
   return capabilitiesPromise;
 }
 
-/** Forget the probed columns (used after the owner runs the migration and reloads). */
+/** Forget the probed columns/tables (used after the owner runs a migration and in tests). */
 export function resetWatchItemCapabilities(): void {
   capabilitiesPromise = null;
+  pdfTrashTableMissing = false;
 }
 
 /**
@@ -193,13 +210,13 @@ export async function saveCloudVideo(userId: string, record: VideoRecord): Promi
  * Lift a lesson's tombstone. Called only when the user deliberately opens a deleted lesson
  * again — no cached copy is allowed to do this on its own.
  */
-export async function clearCloudVideoDeletion(userId: string, videoId: string): Promise<void> {
+export async function clearCloudVideoDeletion(userId: string, videoId: string, revivedAt: number = Date.now()): Promise<void> {
   if (!supabase) return;
   const capabilities = await watchItemCapabilities();
   if (!capabilities.deletions) return;
   const { error } = await supabase
     .from('watch_items')
-    .update({ deleted_at: null, updated_at: new Date().toISOString() })
+    .update({ deleted_at: null, updated_at: new Date(revivedAt).toISOString() })
     .eq('user_id', userId)
     .eq('video_id', videoId);
   if (error) throw error;
@@ -207,17 +224,61 @@ export async function clearCloudVideoDeletion(userId: string, videoId: string): 
 
 export async function deleteCloudVideo(userId: string, videoId: string, deletedAt: number = Date.now()): Promise<void> {
   if (!supabase) return;
+  syncedThumbnails.delete(videoId);
   const capabilities = await watchItemCapabilities();
   if (!capabilities.deletions) {
     // Pre-migration project: fall back to the old hard delete so the lesson at least leaves
-    // the account. The local tombstone still keeps it deleted on this device.
+    // `watch_items` (the account sync ledger + local tombstone still keep it deleted across devices).
     const { error } = await supabase.from('watch_items').delete().eq('user_id', userId).eq('video_id', videoId);
     if (error) throw error;
     return;
   }
   const stamp = new Date(deletedAt).toISOString();
+  // Prefer updating an existing row first: avoids INSERT NOT-NULL checks on custom/older
+  // schemas and clears heavy fields (`thumbnail` data URLs, `chapters_raw`, `pdf_path`).
+  const { data: updated, error: updateError } = await supabase
+    .from('watch_items')
+    .update({
+      deleted_at: stamp,
+      updated_at: stamp,
+      hidden_from_recent: true,
+      pdf_path: null,
+      pdf_name: null,
+      pdf_size: null,
+      thumbnail: '',
+      chapters_raw: '',
+    })
+    .eq('user_id', userId)
+    .eq('video_id', videoId)
+    .select('video_id');
+  if (updateError) throw updateError;
+  if (Array.isArray(updated) && updated.length > 0) return;
+
+  // If the lesson was deleted before its initial upload reached `watch_items`, insert a
+  // complete tombstone row with non-null defaults so every PostgreSQL schema accepts it.
+  const tombstoneRow: Record<string, unknown> = {
+    user_id: userId,
+    video_id: videoId,
+    title: 'Deleted lesson',
+    channel: '',
+    thumbnail: '',
+    chapters_raw: '',
+    current_time: 0,
+    duration: 0,
+    subject: 'Other',
+    hidden_from_recent: true,
+    pdf_path: null,
+    pdf_name: null,
+    pdf_size: null,
+    deleted_at: stamp,
+    updated_at: stamp,
+  };
+  if (capabilities.sources) {
+    tombstoneRow.source_kind = videoId.startsWith('file-') ? 'file' : 'youtube';
+    tombstoneRow.source_url = null;
+  }
   const { error } = await supabase.from('watch_items').upsert(
-    { user_id: userId, video_id: videoId, deleted_at: stamp, updated_at: stamp },
+    tombstoneRow,
     { onConflict: 'user_id,video_id' },
   );
   if (error) throw error;
@@ -358,20 +419,18 @@ export async function updateLibraryPdf(
 
 export async function deleteLibraryPdf(userId: string, item: LibraryPdf): Promise<void> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  if (item.storagePath) {
-    const { error: removeError } = await supabase.storage.from('video-notes').remove([item.storagePath]);
-    // A missing file or storage policy hiccup should never block clearing the entry from the library.
-    if (removeError && !/not found|404|no such|invalid/i.test(removeError.message)) {
-      console.warn('Could not remove library PDF object from storage:', removeError.message);
-    }
-  }
-  await Promise.allSettled([
-    supabase.from('pdf_trash').delete().eq('pdf_id', item.id).eq('user_id', userId),
-    supabase.from('pdf_activity').delete().eq('pdf_id', item.id).eq('user_id', userId),
-    supabase.from('pdf_annotations').delete().eq('pdf_id', item.id).eq('user_id', userId),
-  ]);
+  // Remove the database row first so the entry leaves the account immediately even if storage
+  // cleanup is slow or the tab closes right after.
   const { error } = await supabase.from('pdf_library').delete().eq('id', item.id).eq('user_id', userId);
   if (error) throw error;
+  await Promise.allSettled([
+    pdfTrashTableMissing
+      ? Promise.resolve()
+      : supabase.from('pdf_trash').delete().eq('pdf_id', item.id).eq('user_id', userId),
+    supabase.from('pdf_activity').delete().eq('pdf_id', item.id).eq('user_id', userId),
+    supabase.from('pdf_annotations').delete().eq('pdf_id', item.id).eq('user_id', userId),
+    item.storagePath ? deleteCloudPdf(item.storagePath) : Promise.resolve(),
+  ]);
 }
 
 /* ---------------------------------------------------------------------------
@@ -604,33 +663,135 @@ export interface PdfActivityEntry {
 
 export async function fetchPdfTrash(userId: string): Promise<PdfTrashEntry[]> {
   if (!supabase) return [];
+  if (pdfTrashTableMissing) throw new Error('pdf_trash table is not migrated');
   const { data, error } = await supabase
     .from('pdf_trash')
     .select('pdf_id, deleted_at')
     .eq('user_id', userId);
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) pdfTrashTableMissing = true;
+    throw error;
+  }
   return (data as { pdf_id: string; deleted_at: string | null }[]).map((row) => ({
     pdfId: row.pdf_id,
     deletedAt: row.deleted_at ? new Date(row.deleted_at).getTime() : Date.now(),
   }));
 }
 
+/**
+ * Fetch the account's `pdf_trash` map, or `null` when the optional `pdf_trash` table has not
+ * been migrated (or cannot be reached right now). Callers reconcile `null` through the
+ * account sync ledger so soft-deletes still reach every device without requiring migration 005.
+ */
+export async function fetchPdfTrashMap(userId: string): Promise<Record<string, number> | null> {
+  if (!supabase || pdfTrashTableMissing) return null;
+  try {
+    const entries = await fetchPdfTrash(userId);
+    return Object.fromEntries(entries.map((entry) => [entry.pdfId, entry.deletedAt]));
+  } catch {
+    return null;
+  }
+}
+
 /** Move a PDF to "Recently deleted". The library row and the file stay untouched. */
-export async function trashLibraryPdf(userId: string, pdfId: string): Promise<number> {
+export async function trashLibraryPdf(userId: string, pdfId: string, deletedAtMs: number = Date.now()): Promise<number> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  const deletedAt = new Date().toISOString();
+  if (pdfTrashTableMissing) throw new Error('pdf_trash table is not migrated');
+  const deletedAt = new Date(deletedAtMs).toISOString();
   const { error } = await supabase
     .from('pdf_trash')
     .upsert({ pdf_id: pdfId, user_id: userId, deleted_at: deletedAt }, { onConflict: 'pdf_id' });
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) pdfTrashTableMissing = true;
+    throw error;
+  }
   return new Date(deletedAt).getTime();
 }
 
 /** Take a PDF out of "Recently deleted". */
 export async function restoreLibraryPdf(userId: string, pdfId: string): Promise<void> {
   if (!supabase) throw new Error('Cloud sync is not configured.');
+  if (pdfTrashTableMissing) return;
   const { error } = await supabase.from('pdf_trash').delete().eq('pdf_id', pdfId).eq('user_id', userId);
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      pdfTrashTableMissing = true;
+      return;
+    }
+    throw error;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Account Sync Ledger (`__focusframe_sync_v1__` in `lesson_annotations`).
+ *
+ * Bridges cross-device deletions and soft-deletes in two critical ways:
+ *   1. Projects that never ran `005_pdf_activity_and_trash.sql` (or `008`) still sync PDF
+ *      "Recently deleted", restores, permanent PDF deletions, and lesson tombstones across
+ *      every device with zero extra SQL setup.
+ *   2. `lesson_annotations` is published to `supabase_realtime`, so any deletion or removal
+ *      broadcasts live to other open tabs/devices in milliseconds.
+ * ------------------------------------------------------------------------- */
+
+export const SYNC_LEDGER_VIDEO_ID = '__focusframe_sync_v1__';
+const SYNC_LEDGER_SCOPE: AnnotationScope = { kind: 'lesson', videoId: SYNC_LEDGER_VIDEO_ID };
+
+let ledgerWriteChain: Promise<unknown> = Promise.resolve();
+
+export interface CloudSyncLedgerRecord {
+  ledger: SyncLedger;
+  updatedAt: number;
+  available: boolean;
+}
+
+export async function fetchCloudSyncLedger(userId: string): Promise<CloudSyncLedgerRecord> {
+  if (!supabase) return { ledger: emptySyncLedger(), updatedAt: 0, available: false };
+  try {
+    const record = await fetchCloudAnnotations(userId, SYNC_LEDGER_SCOPE);
+    if (!record) return { ledger: emptySyncLedger(), updatedAt: 0, available: true };
+    return {
+      ledger: normalizeSyncLedger(record.annotations),
+      updatedAt: record.updatedAt,
+      available: true,
+    };
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return { ledger: emptySyncLedger(), updatedAt: 0, available: false };
+    }
+    throw error;
+  }
+}
+
+export async function pushCloudSyncLedger(
+  userId: string,
+  patch: Partial<SyncLedger>,
+): Promise<{ ledger: SyncLedger | null; available: boolean }> {
+  if (!supabase) return { ledger: null, available: false };
+  const run = async (): Promise<{ ledger: SyncLedger | null; available: boolean }> => {
+    try {
+      const existing = await fetchCloudAnnotations(userId, SYNC_LEDGER_SCOPE);
+      const base = existing ? normalizeSyncLedger(existing.annotations) : null;
+      const merged = mergeSyncLedgers(base, patch);
+      const stamp = nextLessonStamp(existing?.updatedAt ?? 0, merged.signalAt ?? 0);
+      await saveCloudAnnotations(userId, SYNC_LEDGER_SCOPE, merged, stamp);
+      return { ledger: merged, available: true };
+    } catch (error) {
+      if (isMissingTableError(error)) return { ledger: null, available: false };
+      throw error;
+    }
+  };
+  const next = ledgerWriteChain.then(run, run);
+  ledgerWriteChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+export function subscribeCloudSyncLedger(
+  userId: string,
+  onChange: (ledger: SyncLedger | null) => void,
+): () => void {
+  return subscribeCloudAnnotations(userId, SYNC_LEDGER_SCOPE, (change) => {
+    onChange(change ? normalizeSyncLedger(change.annotations) : null);
+  });
 }
 
 export async function fetchPdfActivity(userId: string): Promise<PdfActivityEntry[]> {

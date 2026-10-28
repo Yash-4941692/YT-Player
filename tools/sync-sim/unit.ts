@@ -6,9 +6,12 @@
 import './websocket-shim';
 import { annotationChangeFromRow } from '../../src/lib/supabase';
 import { nextRevisionStamp, type AnnotationCacheEntry } from '../../src/lib/storage';
-import { mergeLessonCopies, withDeletion, withoutDeletion, withoutDeletedPdfs } from '../../src/lib/lessonSync';
+import {
+  mergeLessonCopies, mergeSyncLedgers, nextLessonStamp, reconcilePdfState,
+  withDeletion, withoutDeletion, withoutDeletedPdfs,
+} from '../../src/lib/lessonSync';
 import { fileLessonId, isYouTubeLink, parseLessonInput } from '../../src/lib/youtube';
-import type { VideoRecord } from '../../src/types';
+import type { LibraryPdf, VideoRecord } from '../../src/types';
 
 let failures = 0;
 
@@ -117,6 +120,107 @@ console.log('\n• tombstone helpers');
 check('adding a tombstone', withDeletion({}, 'pdf', 'abc', 10)['pdf:abc'], 10);
 check('removing one again', withoutDeletion({ 'pdf:abc': 10 }, 'pdf', 'abc'), {});
 check('deleted PDFs are dropped from the library', withoutDeletedPdfs([{ id: 'a' }, { id: 'b' }], { 'pdf:a': 1 }), [{ id: 'b' }]);
+
+console.log('\n• monotonic lesson & file revision stamps (clock skew across devices)');
+check('behind clock still beats remote updatedAt', nextLessonStamp(10_000, 0, 2_000), 10_001);
+check('behind clock still beats remote deletedAt', nextLessonStamp(1_000, 15_000, 2_000), 15_001);
+check('ahead clock uses wall time', nextLessonStamp(5_000, 6_000, 20_000), 20_000);
+{
+  // Device B has clock +60 s ahead; Device A archives ("Remove from library") or detaches PDF:
+  const cachedOnB = lesson('vid1', 60_000, { archived: false, pdfPath: 'u/vid1.pdf', pdfName: 'notes.pdf' });
+  const stampOnA = nextLessonStamp(cachedOnB.updatedAt, 0, 1_000);
+  const updatedOnA = lesson('vid1', stampOnA, { archived: true, pdfPath: undefined, pdfName: undefined });
+  const mergedOnB = mergeLessonCopies([cachedOnB], [updatedOnA], {});
+  check('archive + PDF detach from a behind-clock device wins on the ahead-clock device', [
+    mergedOnB.videos[0]?.archived,
+    mergedOnB.videos[0]?.pdfPath ?? null,
+  ], [true, null]);
+  check('newly archived lessons are reported so an open player stops', mergedOnB.newlyArchivedIds, ['vid1']);
+  check('cleared lesson PDFs are reported so session caches clear', mergedOnB.clearedPdfIds, ['vid1']);
+}
+{
+  // Fallback ledger tombstones when `watch_items.deleted_at` column is absent on the project:
+  const cachedOnB = lesson('vid2', 5_000);
+  const merged = mergeLessonCopies([cachedOnB], [], {}, { vid2: { status: 'deleted', at: 5_001 } });
+  check('ledger tombstone removes cached lesson even without watch_items.deleted_at', merged.videos, []);
+  check('ledger tombstone is persisted locally', merged.deletions['lesson:vid2'], 5_001);
+  check('removedIds includes ledger-deleted lesson', merged.removedIds, ['vid2']);
+}
+
+console.log('\n• PDF library trash, restore & delete-forever reconciliation (with and without pdf_trash)');
+function pdfItem(id: string, updatedAt = 1_000): LibraryPdf {
+  return {
+    id,
+    name: `${id}.pdf`,
+    subject: 'Physics',
+    size: 1024,
+    storagePath: `user-1/library/${id}.pdf`,
+    createdAt: 1_000,
+    updatedAt,
+  };
+}
+{
+  // Without `pdf_trash` table (remoteTrash === null): Device A trashes a PDF via SyncLedger,
+  // Device B reconciles and moves it to Recently deleted.
+  const remotePdfs = [pdfItem('p1', 1_000), pdfItem('p2', 1_000)];
+  const bState = reconcilePdfState({
+    remotePdfs,
+    localSessionPdfs: [],
+    localSync: {},
+    localTrashFallback: {},
+    localDeletionsFallback: {},
+    remoteTrash: null,
+    remoteLedgerPdfs: { p1: { status: 'trashed', at: 2_000, deletedAt: 2_000 } },
+  });
+  check('without pdf_trash table, ledger trash reaches Device B', bState.trash, { p1: 2_000 });
+  check('newlyTrashedIds flags p1 so an open reader closes', bState.newlyTrashedIds, ['p1']);
+
+  // Device B restores p1 (even with a behind clock):
+  const restoreStamp = nextLessonStamp(bState.syncMap.p1?.at ?? 0, 1_000, 500);
+  const mergedLedger = mergeSyncLedgers(
+    { version: 1, pdfs: { p1: { status: 'trashed', at: 2_000, deletedAt: 2_000 } }, lessons: {} },
+    { pdfs: { p1: { status: 'active', at: restoreStamp } } },
+  );
+  const aAfterRestore = reconcilePdfState({
+    remotePdfs,
+    localSessionPdfs: [],
+    localSync: { p1: { status: 'trashed', at: 2_000, deletedAt: 2_000 } },
+    localTrashFallback: { p1: 2_000 },
+    localDeletionsFallback: {},
+    remoteTrash: null,
+    remoteLedgerPdfs: mergedLedger.pdfs,
+  });
+  check('restoring on Device B clears Recently deleted on Device A', aAfterRestore.trash, {});
+}
+{
+  // Legacy local trash (created before this fix when pdf_trash table was missing) promotes to SyncLedger:
+  const promoted = reconcilePdfState({
+    remotePdfs: [pdfItem('legacy-pdf', 1_000)],
+    localSessionPdfs: [],
+    localSync: {},
+    localTrashFallback: { 'legacy-pdf': 3_500 },
+    localDeletionsFallback: {},
+    remoteTrash: null,
+    remoteLedgerPdfs: {},
+  });
+  check('legacy local trash is kept when pdf_trash table is absent', promoted.trash, { 'legacy-pdf': 3_500 });
+  check('legacy local trash is queued into the cloud sync ledger', promoted.ledgerPatch['legacy-pdf']?.status, 'trashed');
+}
+{
+  // Permanent delete on Device A hides a lingering remote row on Device B and queues cleanup:
+  const afterForever = reconcilePdfState({
+    remotePdfs: [pdfItem('doomed', 1_000), pdfItem('keep', 1_000)],
+    localSessionPdfs: [],
+    localSync: {},
+    localTrashFallback: { doomed: 2_000 },
+    localDeletionsFallback: {},
+    remoteTrash: { doomed: 2_000 },
+    remoteLedgerPdfs: { doomed: { status: 'deleted', at: 4_000 } },
+  });
+  check('permanently deleted PDF disappears on other devices immediately', afterForever.items.map((i) => i.id), ['keep']);
+  check('permanently deleted PDF is removed from Recently deleted too', afterForever.trash, {});
+  check('lingering remote row is queued for hard delete', afterForever.pendingHardDeletes.map((i) => i.id), ['doomed']);
+}
 
 /* ---------------------------------------------------------------------------------------
  * Direct video links.
