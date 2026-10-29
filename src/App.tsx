@@ -89,7 +89,11 @@ export default function App() {
   const [syncedUserId, setSyncedUserId] = useState<string | null>(null);
 
   const [urlInput, setUrlInput] = useState('');
-  const [selectedSubject, setSelectedSubject] = useState<Subject>('Physics');
+  const [selectedSubject, setSelectedSubject] = useState<Subject>('Other');
+  const [customSubjects, setCustomSubjects] = useState<string[]>([]);
+  const [subjectDraft, setSubjectDraft] = useState('');
+  const [addingSubject, setAddingSubject] = useState(false);
+  const [subjectMessage, setSubjectMessage] = useState('');
   const [urlError, setUrlError] = useState('');
   const [source, setSource] = useState<PlayerSource | null>(null);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
@@ -137,6 +141,44 @@ export default function App() {
   const [deleteSyncMissing, setDeleteSyncMissing] = useState(false);
 
   const playerControlsRef = useRef<PlayerControls | null>(null);
+  // Subjects are scoped to the signed-in account (or this browser's guest profile).
+  // Account metadata makes the saved list available even before it is used by a lesson.
+  useEffect(() => {
+    const key = `focusframe.subjects.${authUser?.id ?? 'guest'}`;
+    let local: string[] = [];
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(key) || '[]');
+      if (Array.isArray(value)) local = value.filter((v): v is string => typeof v === 'string' && !!v.trim() && v.length <= 80);
+    } catch { /* storage may be unavailable */ }
+    const cloud: unknown = authUser?.user_metadata?.focusframe_subjects;
+    const remote = Array.isArray(cloud) ? cloud.filter((v): v is string => typeof v === 'string' && !!v.trim() && v.length <= 80) : [];
+    setCustomSubjects([...new Set([...local, ...remote])]);
+    setSelectedSubject('Other');
+    setAddingSubject(false);
+    setSubjectMessage('');
+  }, [authUser?.id]);
+
+  const subjectOptions = useMemo(() => [...new Set([...subjects, ...customSubjects, ...videos.map((v) => v.subject), ...libraryPdfs.map((p) => p.subject)])], [customSubjects, videos, libraryPdfs]);
+
+  async function saveCustomSubject() {
+    const name = subjectDraft.trim().replace(/\s+/g, ' ');
+    if (!name || name.length > 80 || ['all', 'removed'].includes(name.toLowerCase())) {
+      setSubjectMessage('Enter a subject name (up to 80 characters; “all” and “removed” are reserved).');
+      return;
+    }
+    const existing = subjectOptions.find((s) => s.toLowerCase() === name.toLowerCase());
+    const selected = existing ?? name;
+    const next = existing ? customSubjects : [...customSubjects, name];
+    setCustomSubjects(next); setSelectedSubject(selected); setSubjectDraft(''); setAddingSubject(false);
+    try { localStorage.setItem(`focusframe.subjects.${authUser?.id ?? 'guest'}`, JSON.stringify(next)); }
+    catch { setSubjectMessage('This browser could not save the subject locally.'); return; }
+    if (authUser && supabase) {
+      const { error } = await supabase.auth.updateUser({ data: { focusframe_subjects: next } });
+      if (error) { setSubjectMessage('Subject saved on this device only; account sync failed.'); return; }
+    }
+    setSubjectMessage(authUser ? 'Subject saved to your account.' : 'Subject saved in this browser.');
+  }
+
   const authUserIdRef = useRef<string | null>(null);
   authUserIdRef.current = authUser?.id ?? null;
   const deletionsRef = useRef(deletions);
@@ -1633,7 +1675,7 @@ export default function App() {
   const removedVideos = videos.filter((video) => video.archived);
   const showingRemoved = libraryFilter === 'removed';
   const filteredLibrary = showingRemoved ? [] : libraryVideos.filter((video) => libraryFilter === 'all' || video.subject === libraryFilter);
-  const availableSubjects = subjects.filter((subject) => libraryVideos.some((video) => video.subject === subject));
+  const availableSubjects = subjectOptions.filter((subject) => libraryVideos.some((video) => video.subject === subject));
   const libraryVisible = libraryVideos.length > 0 || removedVideos.length > 0 || showingRemoved;
 
   const activeLibraryPdfs = libraryPdfs.filter((item) => !pdfTrash[item.id]);
@@ -1772,11 +1814,14 @@ export default function App() {
       </div>
       <label className="subject-select-label">
         <span className="sr-only">Subject</span>
-        <select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a JEE subject">
-          {subjects.map((subject) => <option key={subject}>{subject}</option>)}
+        <select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a subject">
+          {subjectOptions.map((subject) => <option key={subject}>{subject}</option>)}
         </select>
         <ChevronDown size={13} />
       </label>
+      <button className="button-quiet" type="button" onClick={() => { setAddingSubject((value) => !value); setSubjectMessage(''); }}>+ Subject</button>
+      {addingSubject && <div className="custom-subject-entry"><input aria-label="New subject name" placeholder="Your subject" maxLength={80} value={subjectDraft} onChange={(event) => setSubjectDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveCustomSubject(); } }} /><button className="button-quiet" type="button" onClick={() => void saveCustomSubject()}>Save subject</button></div>}
+      {subjectMessage && <span className="custom-subject-message" role="status">{subjectMessage}</span>}
       <button className="button-primary load-button" type="submit"><span>{source ? 'Load video' : 'Start studying'}</span><ArrowRight size={17} /></button>
     </form>
   );
@@ -1792,7 +1837,7 @@ export default function App() {
             <span className="brand-mark"><Play size={15} fill="currentColor" /></span>
             <span className="brand-name">focusframe<span>.</span></span>
             <span className="brand-divider" />
-            <span className="brand-subtitle">JEE STUDY PLAYER</span>
+            <span className="brand-subtitle">STUDY PLAYER</span>
           </a>
           <div className="topbar-actions">
             <div className={`sync-pill ${syncStatus}`} title={syncMessage || (storageAvailable ? 'Saved locally in this browser' : 'Browser storage is unavailable; current tab remains usable')}>
@@ -1837,8 +1882,8 @@ export default function App() {
             <section className="hero">
               <div className="hero-copy">
                 <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
-                <h1>Your JEE one-shots,<br className="desktop-break" /> with your <em>notes open.</em></h1>
-                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. YouTube links and direct video links both work.</p>
+                <h1>Your study videos,<br className="desktop-break" /> with your <em>notes open.</em></h1>
+                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. Enjoy an ad-free study workspace with YouTube links and direct video links.</p>
               </div>
               {loadForm}
               {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
@@ -1859,7 +1904,7 @@ export default function App() {
                   <div className="welcome-icon mint"><Film size={20} /></div>
                   <span className="welcome-number">01</span>
                   <h3>Paste a lesson</h3>
-                  <p>A YouTube one-shot, a playlist, or any direct video link starts the room.</p>
+                  <p>A YouTube video, playlist, or direct video link starts the room.</p>
                 </article>
                 <article className="welcome-card">
                   <div className="welcome-icon lavender"><ListMusic size={20} /></div>
@@ -1980,6 +2025,7 @@ export default function App() {
           )}
 
           <PdfLibraryPanel
+            subjects={subjectOptions}
             items={activeLibraryPdfs}
             deletedItems={deletedLibraryPdfs}
             deletedAt={pdfTrash}
@@ -2037,6 +2083,7 @@ export default function App() {
                       <LibraryCard
                         key={video.videoId}
                         video={video}
+                        subjects={subjectOptions}
                         removed
                         active={video.videoId === activeVideoId}
                         pdfHidden={Boolean(video.pdfPath && trashedLibraryPaths.has(video.pdfPath))}
@@ -2050,6 +2097,7 @@ export default function App() {
                       <LibraryCard
                         key={video.videoId}
                         video={video}
+                        subjects={subjectOptions}
                         active={video.videoId === activeVideoId}
                         pdfHidden={Boolean(video.pdfPath && trashedLibraryPaths.has(video.pdfPath))}
                         onResume={() => resumeVideo(video)}
@@ -2092,6 +2140,7 @@ export default function App() {
 
 interface LibraryCardProps {
   video: VideoRecord;
+  subjects: Subject[];
   active: boolean;
   /** Removed (archived) lessons show Restore + Delete forever instead of Remove. */
   removed?: boolean;
@@ -2106,7 +2155,7 @@ interface LibraryCardProps {
 }
 
 function LibraryCard({
-  video, active, removed = false, pdfHidden = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
+  video, subjects, active, removed = false, pdfHidden = false, onResume, onRemove, onRestore, onDeleteForever, onRename,
 }: LibraryCardProps) {
   const percent = Math.round(progressPercent(video));
   const [editing, setEditing] = useState(false);

@@ -1,4 +1,4 @@
-export type Subject = 'Physics' | 'Chemistry' | 'Mathematics' | 'Other';
+export type Subject = string;
 
 /**
  * Where a lesson's video comes from.
