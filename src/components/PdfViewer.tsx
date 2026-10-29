@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import {
   ArrowDownToLine, ChevronLeft, ChevronRight, Cloud, ExternalLink, FileText, Info, Loader,
   LockKeyhole, Maximize2, Minimize2, Trash2, Upload, ZoomIn, ZoomOut,
@@ -158,34 +158,17 @@ export function PdfViewer({
   const [pageTexts, setPageTexts] = useState<string[] | null>(null);
   const [textProgress, setTextProgress] = useState(0);
   const [textError, setTextError] = useState('');
-  const [query, setQuery] = useState('');
-  const [matchIndex, setMatchIndex] = useState(0);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrStatus, setOcrStatus] = useState('');
   const ocrGeneration = useRef(0);
-  const matches = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle || !pageTexts) return [];
-    return pageTexts.flatMap((text, index) => {
-      const lower = text.toLocaleLowerCase();
-      const found: { page: number; snippet: string }[] = [];
-      let offset = 0;
-      while ((offset = lower.indexOf(needle, offset)) !== -1) {
-        found.push({ page: index + 1, snippet: text.slice(Math.max(0, offset - 40), Math.min(text.length, offset + needle.length + 60)).replace(/\s+/g, ' ') });
-        offset += needle.length;
-      }
-      return found;
-    });
-  }, [pageTexts, query]);
-
   // Extract embedded text locally; OCR for image-only pages is opt-in.
   useEffect(() => {
     ocrGeneration.current += 1;
-    setPageTexts(null); setTextProgress(0); setTextError(''); setQuery(''); setMatchIndex(0); setTextToolsOpen(false); setOcrRunning(false); setOcrStatus('');
+    setPageTexts(null); setTextProgress(0); setTextError(''); setTextToolsOpen(false); setOcrRunning(false); setOcrStatus('');
     return () => { ocrGeneration.current += 1; };
   }, [url]);
   useEffect(() => {
-    if (!textToolsOpen || viewerStatus !== 'ready' || !docRef.current) return;
+    if (!textToolsOpen || viewerStatus !== 'ready' || !docRef.current || pageTexts) return;
     let cancelled = false;
     const doc = docRef.current;
     setTextError('');
@@ -711,7 +694,7 @@ export function PdfViewer({
               </div>
             </>
           )}
-          {viewerStatus === 'ready' && <button type="button" className="pdf-text-toggle" onClick={() => setTextToolsOpen((open) => !open)} aria-expanded={textToolsOpen}>Find / extract text</button>}
+          {viewerStatus === 'ready' && <button type="button" className="pdf-text-toggle" onClick={() => setTextToolsOpen((open) => !open)} aria-expanded={textToolsOpen}>Extract text</button>}
           <div className="pdf-control-group">
             {url && <button type="button" onClick={onDownload} aria-label="Download notes" title="Download"><ArrowDownToLine size={16} /></button>}
             {url && <a href={url} target="_blank" rel="noreferrer" aria-label="Open notes in a new tab" title="Open in a new tab"><ExternalLink size={16} /></a>}
@@ -725,16 +708,12 @@ export function PdfViewer({
       {textToolsOpen && viewerStatus === 'ready' && (
         <div className="pdf-text-tools">
           <div className="pdf-text-row">
-            <input aria-label="Find text in PDF" placeholder="Find in PDF…" value={query} onChange={(event) => { setQuery(event.target.value); setMatchIndex(0); }} />
-            <button type="button" disabled={!matches.length} aria-label="Previous match" onClick={() => { const next = (matchIndex - 1 + matches.length) % matches.length; setMatchIndex(next); jumpToPage(matches[next].page); }}>Previous</button>
-            <button type="button" disabled={!matches.length} aria-label="Next match" onClick={() => { const next = (matchIndex + 1) % matches.length; setMatchIndex(next); jumpToPage(matches[next].page); }}>Next</button>
             <button type="button" disabled={!pageTexts || !pageTexts.some(Boolean) || ocrRunning} onClick={downloadText}>Download text</button>
             <button type="button" disabled={!pageTexts || ocrRunning || pageTexts.every((text) => Boolean(text.trim()))} onClick={() => void runOcr()}>Recognize scanned pages (English)</button>
           </div>
-          <p role="status">{textError || (!pageTexts ? `Reading text: ${textProgress} / ${pageCount} pages…` : query.trim() ? matches.length ? `${matchIndex + 1} of ${matches.length} matches · Page ${matches[matchIndex]?.page}: …${matches[matchIndex]?.snippet}…` : 'No matches found.' : 'Search embedded text or download it as a .txt file.')}</p>
-          {pageTexts && <p>Search opens the matching page. Use English OCR for pages without embedded text. OCR runs in your browser; its files are downloaded online. Results and reading order may contain errors, especially for mixed or poor-quality scans.</p>}
+          <p role="status">{textError || (!pageTexts ? `Reading text: ${textProgress} / ${pageCount} pages…` : 'Download the extracted text as a .txt file.')}</p>
+          {pageTexts && <p>Use English OCR for pages without embedded text. OCR runs in your browser; its files are downloaded online. Results and reading order may contain errors, especially for mixed or poor-quality scans.</p>}
           {ocrStatus && <p role="status">{ocrStatus}</p>}
-          {matches.length > 0 && <button type="button" onClick={() => jumpToPage(matches[matchIndex].page)}>Go to match page</button>}
         </div>
       )}
       {locked ? (

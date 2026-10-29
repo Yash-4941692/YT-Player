@@ -1,7 +1,7 @@
 {
   "name": "Focusframe — Distraction-Free Study Player",
   "short_name": "Focusframe",
-  "description": "Watch YouTube study videos with timestamps and searchable PDF notes side by side. A distraction-free study space for every student.",
+  "description": "Watch YouTube study videos with timestamps and PDF notes side by side. A distraction-free study space for every student.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

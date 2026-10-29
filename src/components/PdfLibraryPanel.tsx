@@ -7,7 +7,6 @@ import { formatLibraryDate, pdfTitle, sortLibrary } from '../lib/pdfLibrary';
 import { formatBytes } from '../lib/utils';
 import type { LibraryPdf, Subject } from '../types';
 
-const subjects: Subject[] = ['Physics', 'Chemistry', 'Mathematics', 'Other'];
 
 /** How long a deleted PDF waits in "Recently deleted" before the owner can purge it. */
 const TRASH_RETENTION_DAYS = 30;
@@ -42,6 +41,7 @@ function formatSize(bytes: number): string {
 }
 
 interface Props {
+  subjects: Subject[];
   items: LibraryPdf[];
   deletedItems: LibraryPdf[];
   deletedAt: Record<string, number>;
@@ -68,7 +68,7 @@ interface Props {
 }
 
 export function PdfLibraryPanel({
-  items, deletedItems, deletedAt, activity, usedBytes, trashUnavailable, loading, busy, error, status,
+  subjects, items, deletedItems, deletedAt, activity, usedBytes, trashUnavailable, loading, busy, error, status,
   signedIn, cloudConfigured, canAttach, attachedPath,
   onUpload, onOpen, onDownload, onDelete, onRestore, onDeleteForever, onRename, onAttach, onSignIn,
 }: Props) {
@@ -354,6 +354,7 @@ export function PdfLibraryPanel({
                 <PdfCard
                   key={item.id}
                   item={item}
+                  subjects={subjects}
                   attached={Boolean(attachedPath && item.storagePath && item.storagePath === attachedPath)}
                   canAttach={canAttach && !item.sessionOnly}
                   onOpen={() => onOpen(item)}
@@ -381,6 +382,7 @@ export function PdfLibraryPanel({
 }
 
 interface CardProps {
+  subjects: Subject[];
   item: LibraryPdf;
   attached: boolean;
   canAttach: boolean;
@@ -393,7 +395,7 @@ interface CardProps {
   onAttach: () => void;
 }
 
-function PdfCard({ item, attached, canAttach, pageCount, lastOpenedAt, onOpen, onDownload, onDelete, onRename, onAttach }: CardProps) {
+function PdfCard({ subjects, item, attached, canAttach, pageCount, lastOpenedAt, onOpen, onDownload, onDelete, onRename, onAttach }: CardProps) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(pdfTitle(item.name));
   const [draftSubject, setDraftSubject] = useState<Subject>(item.subject);

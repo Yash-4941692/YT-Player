@@ -17,7 +17,7 @@ export interface StoredPdfActivity {
 }
 
 function isSubject(value: unknown): value is Subject {
-  return value === 'Physics' || value === 'Chemistry' || value === 'Mathematics' || value === 'Other';
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 80;
 }
 
 function normalizeVideo(value: unknown): VideoRecord | null {

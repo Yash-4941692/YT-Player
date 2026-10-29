@@ -866,3 +866,6 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
 .pdf-text-row input { flex: 1; min-width: 120px; color: #fff; background: #0d0e15; border: 1px solid #686178; border-radius: 7px; padding: 7px; }
 .pdf-text-tools button:disabled { opacity: .45; }
 .pdf-text-tools p { margin: 7px 0 0; line-height: 1.45; overflow-wrap: anywhere; }
+.custom-subject-entry { display: flex; align-items: center; gap: 6px; }
+.custom-subject-entry input { min-width: 100px; max-width: 160px; padding: 8px; color: #fff; background: #12131e; border: 1px solid #686178; border-radius: 8px; }
+.custom-subject-message { color: #c5c2d1; font-size: 11px; }

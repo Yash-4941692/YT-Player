@@ -28,7 +28,7 @@ create table if not exists public.watch_items (
   -- plain lowercase `current_time` that the app reads and writes.
   "current_time" double precision not null default 0,
   duration double precision not null default 0,
-  subject text not null default 'Other' check (subject in ('Physics', 'Chemistry', 'Mathematics', 'Other')),
+  subject text not null default 'Other' check (char_length(trim(subject)) between 1 and 80),
   is_revision boolean not null default false,
   hidden_from_recent boolean not null default false,
   bookmarks jsonb not null default '[]'::jsonb,
@@ -82,7 +82,7 @@ create table if not exists public.pdf_library (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   name text not null default 'notes.pdf',
-  subject text not null default 'Other' check (subject in ('Physics', 'Chemistry', 'Mathematics', 'Other')),
+  subject text not null default 'Other' check (char_length(trim(subject)) between 1 and 80),
   size bigint not null default 0,
   storage_path text not null,
   created_at timestamptz not null default now(),
