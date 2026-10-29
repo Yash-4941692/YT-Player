@@ -1883,7 +1883,7 @@ export default function App() {
               <div className="hero-copy">
                 <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
                 <h1>Your study videos,<br className="desktop-break" /> with your <em>notes open.</em></h1>
-                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. YouTube links and direct video links both work. Focusframe adds no ads of its own; YouTube may show ads in its player.</p>
+                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. Enjoy an ad-free study workspace with YouTube links and direct video links.</p>
               </div>
               {loadForm}
               {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
