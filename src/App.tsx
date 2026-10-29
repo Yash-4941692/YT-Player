@@ -89,7 +89,7 @@ export default function App() {
   const [syncedUserId, setSyncedUserId] = useState<string | null>(null);
 
   const [urlInput, setUrlInput] = useState('');
-  const [selectedSubject, setSelectedSubject] = useState<Subject>('Physics');
+  const [selectedSubject, setSelectedSubject] = useState<Subject>('Other');
   const [urlError, setUrlError] = useState('');
   const [source, setSource] = useState<PlayerSource | null>(null);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
@@ -1772,7 +1772,7 @@ export default function App() {
       </div>
       <label className="subject-select-label">
         <span className="sr-only">Subject</span>
-        <select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a JEE subject">
+        <select value={selectedSubject} onChange={(event) => setSelectedSubject(event.target.value as Subject)} aria-label="Choose a subject">
           {subjects.map((subject) => <option key={subject}>{subject}</option>)}
         </select>
         <ChevronDown size={13} />
@@ -1792,7 +1792,7 @@ export default function App() {
             <span className="brand-mark"><Play size={15} fill="currentColor" /></span>
             <span className="brand-name">focusframe<span>.</span></span>
             <span className="brand-divider" />
-            <span className="brand-subtitle">JEE STUDY PLAYER</span>
+            <span className="brand-subtitle">STUDY PLAYER</span>
           </a>
           <div className="topbar-actions">
             <div className={`sync-pill ${syncStatus}`} title={syncMessage || (storageAvailable ? 'Saved locally in this browser' : 'Browser storage is unavailable; current tab remains usable')}>
@@ -1837,8 +1837,8 @@ export default function App() {
             <section className="hero">
               <div className="hero-copy">
                 <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
-                <h1>Your JEE one-shots,<br className="desktop-break" /> with your <em>notes open.</em></h1>
-                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. YouTube links and direct video links both work.</p>
+                <h1>Your study videos,<br className="desktop-break" /> with your <em>notes open.</em></h1>
+                <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. YouTube links and direct video links both work. Focusframe adds no ads of its own; YouTube may show ads in its player.</p>
               </div>
               {loadForm}
               {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
@@ -1859,7 +1859,7 @@ export default function App() {
                   <div className="welcome-icon mint"><Film size={20} /></div>
                   <span className="welcome-number">01</span>
                   <h3>Paste a lesson</h3>
-                  <p>A YouTube one-shot, a playlist, or any direct video link starts the room.</p>
+                  <p>A YouTube video, playlist, or direct video link starts the room.</p>
                 </article>
                 <article className="welcome-card">
                   <div className="welcome-icon lavender"><ListMusic size={20} /></div>

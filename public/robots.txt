@@ -1,4 +1,4 @@
-# Focusframe — JEE Study Player
+# Focusframe — Study Player
 # The site is a single-page app; every route is served by index.html.
 User-agent: *
 Allow: /

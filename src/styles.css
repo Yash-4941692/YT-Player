@@ -859,3 +859,10 @@ kbd { min-width: 19px; height: 18px; display: inline-grid; place-items: center; 
   .pdf-storage-bar { width: 70px; }
   .pdf-library-card.is-deleted .pdf-library-restore, .pdf-library-card.is-deleted .pdf-library-delete-forever { font-size: 9px; }
 }
+
+.pdf-text-toggle, .pdf-text-tools button { padding: 6px 9px; color: #ded6ff; background: rgba(187,161,255,.1); border: 1px solid rgba(187,161,255,.22); border-radius: 7px; font-size: 11px; }
+.pdf-text-tools { padding: 10px 12px; background: #181723; border-bottom: 1px solid rgba(255,255,255,.08); color: #c5c2d1; font-size: 11px; }
+.pdf-text-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.pdf-text-row input { flex: 1; min-width: 120px; color: #fff; background: #0d0e15; border: 1px solid #686178; border-radius: 7px; padding: 7px; }
+.pdf-text-tools button:disabled { opacity: .45; }
+.pdf-text-tools p { margin: 7px 0 0; line-height: 1.45; overflow-wrap: anywhere; }
