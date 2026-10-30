@@ -8,6 +8,8 @@ A responsive study desk for JEE One Shots: watch a YouTube lesson **or any direc
 
 **PDF library:** signed-in users can upload PDFs to a personal shelf that is not tied to any one lesson. Every PDF is private to the account, can be renamed, tagged by subject, read full screen, downloaded, or attached to the lesson on screen — and it appears on every device they sign in from.
 
+**Built by Yash Sharma** — the credit sits in the hero byline, the site footer (linking to [github.com/Yash-4941692](https://github.com/Yash-4941692)), the no-JavaScript fallback, the social preview card, and the JSON-LD `author`/`creator` metadata, so the maker is visible to visitors, to link previews and to search engines.
+
 ## Fastest way to try it (no keys or accounts)
 
 1. In Vercel, choose **Add New → Project** and import `Yash-4941692/YT-Player`.
@@ -236,6 +238,59 @@ committed:
 npm install --no-save @resvg/resvg-js   # on demand, keeps `npm ci` light
 npm run build:app-icons
 ```
+
+### The social preview card (Linktree / WhatsApp / X / LinkedIn)
+
+Every link preview comes from [`public/og-image.png`](./public/og-image.png) — a 1200×630 card
+that carries the brand, the promise, the feature chips and **“Built by Yash Sharma”**. The same
+file is `og:image`, `twitter:image` and the logo Google may show for the site. Regenerate it
+after a copy change:
+
+```bash
+npm install --no-save @resvg/resvg-js
+npm run build:og-image      # node tools/og-image/generate.mjs
+```
+
+The artwork lives in [`tools/og-image/generate.mjs`](./tools/og-image/generate.mjs) (plain SVG,
+no design tool needed); the three latin font subsets it draws with are committed under
+[`tools/og-image/fonts`](./tools/og-image/fonts) under the SIL Open Font License. After
+replacing the PNG, re-scrape the page so the old card is not cached: WhatsApp and X remember
+an image for days, and the [Facebook sharing debugger](https://developers.facebook.com/tools/debug/)
+or [LinkedIn Post Inspector](https://www.linkedin.com/post-inspector/) will refresh it.
+
+## Search engines (Google, Bing, and the sitemap)
+
+The public URL is **https://focusframe.vercel.app/**. That exact host appears in the canonical
+link, the Open Graph/Twitter image URLs, the JSON-LD `@id`s, `robots.txt` and the sitemap, so a
+sitemap submitted in Search Console for `focusframe.vercel.app` matches the pages it lists. If
+the project is ever served from a different domain, set the old one to **Redirect → 301** in
+Vercel → Settings → Domains, then update the five places listed above.
+
+Everything a crawler needs is already committed:
+
+| File | What it does |
+| --- | --- |
+| [`public/robots.txt`](./public/robots.txt) | Allows every crawler and points to the sitemap. |
+| [`public/sitemap.xml`](./public/sitemap.xml) | Lists the one public URL with `<lastmod>` and `priority 1.0`. |
+| `index.html` `<head>` | Title, description, canonical, Open Graph/Twitter tags, author, and JSON-LD (`WebSite` + `WebApplication` + `Person` for Yash Sharma). |
+| `index.html` verification meta | The `google-site-verification` tag that proves the site belongs to your Search Console account. |
+
+Because Focusframe is a single-page app with one public route, the sitemap only ever needs that
+one entry. Nothing needs to be edited by hand when the copy changes except `<lastmod>`:
+
+```xml
+<url>
+  <loc>https://your-domain.example/</loc>   <!-- the canonical URL, with the trailing slash -->
+  <lastmod>2026-10-30</lastmod>             <!-- YYYY-MM-DD of the last real content change -->
+  <changefreq>weekly</changefreq>
+  <priority>1.0</priority>
+</url>
+```
+
+If the site moves to a custom domain, change the URL in **three** places: `public/sitemap.xml`
+(`<loc>`), `public/robots.txt` (`Sitemap:`), and the four absolute URLs in `index.html`
+(canonical, `og:url`, `og:image`, `twitter:image`) — plus the `@id`/`url` values of the JSON-LD
+block. Then submit the new sitemap in Search Console.
 
 ## Notes
 

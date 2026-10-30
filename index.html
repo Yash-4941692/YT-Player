@@ -1,28 +1,80 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-IN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="google-site-verification" content="MJjYH9lvp0oC_Q8fykyyxr65f0tzcBrbbza_BkIxn2E" />
     <meta name="theme-color" content="#0b0d13" />
     <meta name="description" content="Watch YouTube study videos with timestamps and PDF notes side by side. A distraction-free study space for every student." />
+    <meta name="author" content="Yash Sharma" />
+    <meta name="creator" content="Yash Sharma" />
+    <meta name="publisher" content="Yash Sharma" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <!-- If the site moves to a custom domain, update the four absolute URLs below
          (canonical, og:url, og:image, twitter:image) and public/sitemap.xml. -->
-    <link rel="canonical" href="https://yt-player-yash4941692-9255s-projects.vercel.app/" />
+    <link rel="canonical" href="https://focusframe.vercel.app/" />
     <meta property="og:title" content="Focusframe — Distraction-Free Study Player" />
     <meta property="og:description" content="A distraction-free space for YouTube study videos, timestamps and PDF notes." />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Focusframe" />
-    <meta property="og:url" content="https://yt-player-yash4941692-9255s-projects.vercel.app/" />
-    <meta property="og:image" content="https://yt-player-yash4941692-9255s-projects.vercel.app/og-image.png" />
+    <meta property="og:url" content="https://focusframe.vercel.app/" />
+    <meta property="og:image" content="https://focusframe.vercel.app/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Focusframe — study videos and notes side by side." />
+    <meta property="og:image:alt" content="Focusframe — Your study videos, with your notes open. Built by Yash Sharma." />
     <meta property="og:locale" content="en_IN" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="article:author" content="Yash Sharma" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Focusframe — Distraction-Free Study Player" />
     <meta name="twitter:description" content="A distraction-free space for YouTube study videos, timestamps and PDF notes." />
-    <meta name="twitter:image" content="https://yt-player-yash4941692-9255s-projects.vercel.app/og-image.png" />
+    <meta name="twitter:image" content="https://focusframe.vercel.app/og-image.png" />
+    <meta name="twitter:image:alt" content="Focusframe — Your study videos, with your notes open. Built by Yash Sharma." />
+    <meta name="twitter:label1" content="Built by" />
+    <meta name="twitter:data1" content="Yash Sharma" />
+    <meta name="twitter:label2" content="Price" />
+    <meta name="twitter:data2" content="Free" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Person",
+            "@id": "https://focusframe.vercel.app/#yash-sharma",
+            "name": "Yash Sharma",
+            "url": "https://github.com/Yash-4941692",
+            "sameAs": ["https://github.com/Yash-4941692"],
+            "jobTitle": "Developer"
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://focusframe.vercel.app/#website",
+            "url": "https://focusframe.vercel.app/",
+            "name": "Focusframe",
+            "alternateName": "Focusframe Study Player",
+            "description": "A distraction-free study space that plays YouTube or direct video lessons beside your PDF notes and timestamps.",
+            "inLanguage": "en-IN",
+            "creator": { "@id": "https://focusframe.vercel.app/#yash-sharma" },
+            "publisher": { "@id": "https://focusframe.vercel.app/#yash-sharma" }
+          },
+          {
+            "@type": "WebApplication",
+            "name": "Focusframe",
+            "url": "https://focusframe.vercel.app/",
+            "description": "Watch a YouTube or direct video lesson with timestamps, PDF notes and highlighting side by side — free, ad-free, and synced across devices.",
+            "applicationCategory": "EducationalApplication",
+            "operatingSystem": "Any device with a modern web browser",
+            "browserRequirements": "Requires JavaScript",
+            "image": "https://focusframe.vercel.app/og-image.png",
+            "isAccessibleForFree": true,
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "INR" },
+            "author": { "@id": "https://focusframe.vercel.app/#yash-sharma" },
+            "creator": { "@id": "https://focusframe.vercel.app/#yash-sharma" }
+          }
+        ]
+      }
+    </script>
     <!-- Installing as an app: the manifest supplies the name and the icons Chrome, Windows,
          Android and iOS use for the installed app. Without it Chrome falls back to a text
          placeholder. The raster icons are generated from favicon.svg — see
@@ -41,6 +93,17 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Crawlers and readers without JavaScript still get a description of the app
+         and who made it. Keep this in sync with the visible hero copy. -->
+    <noscript>
+      <div style="max-width:720px;margin:0 auto;padding:40px 20px;font-family:'DM Sans',system-ui,sans-serif;color:#e9e7f1;background:#08090f">
+        <h1 style="font-family:'Manrope',system-ui,sans-serif;font-size:30px;letter-spacing:-.03em;margin:0 0 12px">Focusframe — your study videos, with your notes open.</h1>
+        <p style="color:#a4a2b0;line-height:1.7;margin:0 0 12px">A free, distraction-free study workspace: play a YouTube video or any direct video link, jump through its timestamps, and read, highlight and annotate your PDF notes right beside it.</p>
+        <p style="color:#777582;margin:0">Designed and built by <strong style="color:#d5c9ff">Yash Sharma</strong> —
+          <a href="https://github.com/Yash-4941692" style="color:#83e4c0">github.com/Yash-4941692</a>.
+          Please enable JavaScript to use the player.</p>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

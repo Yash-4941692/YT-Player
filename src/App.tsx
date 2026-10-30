@@ -1884,6 +1884,11 @@ export default function App() {
                 <p className="eyebrow hero-eyebrow"><span className="live-dot" /> TIMESTAMPS AND NOTES, SIDE BY SIDE</p>
                 <h1>Your study videos,<br className="desktop-break" /> with your <em>notes open.</em></h1>
                 <p className="hero-description">Watch the lesson, follow the timestamps, and read your PDF notes right beside the video — on any device. Enjoy an ad-free study workspace with YouTube links and direct video links.</p>
+                <p className="hero-byline">
+                  <span className="maker-avatar" aria-hidden="true">YS</span>
+                  <span>Designed &amp; built by <strong>Yash Sharma</strong></span>
+                  <a href="https://github.com/Yash-4941692" target="_blank" rel="noreferrer">See the code <ArrowUpRight size={11} /></a>
+                </p>
               </div>
               {loadForm}
               {urlError && <p className="url-error" role="alert"><CircleHelp size={14} /> {urlError}</p>}
@@ -2111,7 +2116,24 @@ export default function App() {
             </section>
           )}
 
-          <footer className="footer"><a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a><p>Made for your next breakthrough. Videos are streamed by YouTube or by the link you paste.</p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a></footer>
+          <footer className="footer">
+            <a className="footer-brand" href="#top"><span className="brand-mark"><Play size={11} fill="currentColor" /></span> focusframe<span>.</span></a>
+            <p>Made for your next breakthrough. Videos are streamed by YouTube or by the link you paste.</p>
+            <div className="footer-credits">
+              <a
+                className="maker-credit"
+                href="https://github.com/Yash-4941692"
+                target="_blank"
+                rel="noreferrer"
+                title="Focusframe is designed and built by Yash Sharma"
+              >
+                <span className="maker-avatar" aria-hidden="true">YS</span>
+                <span className="maker-credit-text">Built by <strong>Yash Sharma</strong></span>
+                <ArrowUpRight size={11} />
+              </a>
+              <a className="footer-terms" href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">YouTube terms <ArrowUpRight size={11} /></a>
+            </div>
+          </footer>
         </main>
       </div>
       <input ref={fileInputRef} className="sr-only" type="file" accept=".pdf,application/pdf" onChange={handlePdfSelection} />

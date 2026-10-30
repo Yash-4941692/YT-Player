@@ -3,8 +3,8 @@
      here (and in index.html) if the site ever moves to a custom domain. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://yt-player-yash4941692-9255s-projects.vercel.app/</loc>
-    <lastmod>2026-10-07</lastmod>
+    <loc>https://focusframe.vercel.app/</loc>
+    <lastmod>2026-10-30</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>

@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "build:app-icons": "node tools/app-icons/generate.mjs",
+    "build:og-image": "node tools/og-image/generate.mjs",
     "check:app-icon": "node tools/check-app-icon.mjs",
     "test:pdf-open": "node tools/pdf-open-sim/run.mjs",
     "test:sync": "node tools/sync-sim/run-all.mjs",
