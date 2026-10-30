@@ -260,6 +260,12 @@ or [LinkedIn Post Inspector](https://www.linkedin.com/post-inspector/) will refr
 
 ## Search engines (Google, Bing, and the sitemap)
 
+The public URL is **https://focusframe.vercel.app/**. That exact host appears in the canonical
+link, the Open Graph/Twitter image URLs, the JSON-LD `@id`s, `robots.txt` and the sitemap, so a
+sitemap submitted in Search Console for `focusframe.vercel.app` matches the pages it lists. If
+the project is ever served from a different domain, set the old one to **Redirect → 301** in
+Vercel → Settings → Domains, then update the five places listed above.
+
 Everything a crawler needs is already committed:
 
 | File | What it does |
